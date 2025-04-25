@@ -49,7 +49,8 @@ def get_metric_rates(url,username,api_key,metric_names):
             query_data = query_response.json().get( "data", {}).get("result", [])
             if query_data and len(query_data) > 0 and len(query_data[0].get('value', [])) > 1:
                 dpm = query_data[0]['value'][1]
-                if float(dpm) > 0:
+                # Only show metrics that are not 1dpm
+                if float(dpm) != 1:
                     print(metric_name, dpm)
                     f.write(f"{metric_name} {dpm}\n")
             else:
