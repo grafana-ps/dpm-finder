@@ -39,7 +39,7 @@ def get_metric_rates(url,username,api_key,metric_names):
     with open("metric_rates.txt", "w", encoding="utf-8") as f:
         for metric in filtered_metrics:
             metric_name = metric
-            query = f"count_over_time({metric_name}[5m])/5"
+            query = 'count_over_time(%s{__ignore_usage=""}[5m])/5'%(metric_name)
             query_response = requests.get(
                 metric_value_url,
                 auth=HTTPBasicAuth(username, api_key),
