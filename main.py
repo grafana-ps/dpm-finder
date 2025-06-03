@@ -54,7 +54,7 @@ def get_metric_rates(url,username,api_key,metric_names):
             dpm_data[metric_name] = query_data[0]['value'][1]
         else: 
             continue
-    print(f" Done \n Found {len(dpm_data)} metrics with DPM")
+    print(f" Done \nFound {len(dpm_data)} metrics with DPM")
 
     with open("metric_rates.csv", "w", encoding="utf-8") as f:
         # Write CSV header
