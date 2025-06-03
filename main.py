@@ -67,6 +67,14 @@ def get_metric_rates(url,username,api_key,metric_names):
                 f.write(f"{metric_name},{dpm}\n")
 
 
+
+
+
+if __name__ == "__main__":
+    main()
+
+
+def main(): 
 load_dotenv()
 prometheus_endpoint=os.getenv("PROMETHEUS_ENDPOINT")
 username=os.getenv("PROMETHEUS_USERNAME")
