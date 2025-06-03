@@ -5,6 +5,7 @@ main.py - calculate the DPM for a given prometheus cluster
 and return the results
 """
 import os
+import time
 import argparse
 import requests
 from requests.auth import HTTPBasicAuth
@@ -42,6 +43,7 @@ def get_metric_rates(metric_value_url, username, api_key, metric_names, output_f
         min_dpm: Minimum DPM threshold for showing metrics
         quiet: If True, suppress progress output
     """
+    start_time = time.time()
     dpm_data = {}
     filtered_metrics = [
         metric for metric in metric_names['data']
@@ -49,7 +51,10 @@ def get_metric_rates(metric_value_url, username, api_key, metric_names, output_f
       ]
     if not quiet:
         print(f"Found {len(filtered_metrics)} metrics - checking for DPM")
+    
+    processing_times = []
     for metric in filtered_metrics:
+        metric_start_time = time.time()
         if not quiet:
             print(f".", end="", flush=True)
         metric_name = metric
@@ -63,10 +68,18 @@ def get_metric_rates(metric_value_url, username, api_key, metric_names, output_f
         query_data = query_response.json().get("data", {}).get("result", [])
         if query_data and len(query_data) > 0 and len(query_data[0].get('value', [])) > 1:
             dpm_data[metric_name] = query_data[0]['value'][1]
-        else: 
-            continue
+        processing_times.append(time.time() - metric_start_time)
+
+    total_time = time.time() - start_time
+    avg_metric_time = sum(processing_times) / len(processing_times) if processing_times else 0
+    
     if not quiet:
         print(f" Done \nFound {len(dpm_data)} metrics with DPM")
+        print(f"\nTiming Statistics:")
+        print(f"Total runtime: {total_time:.2f} seconds")
+        print(f"Average time per metric: {avg_metric_time:.3f} seconds")
+        print(f"Total metrics processed: {len(filtered_metrics)}")
+        print(f"Metrics processing rate: {len(filtered_metrics)/total_time:.1f} metrics/second\n")
 
     metrics_above_threshold = 0
     # Sort items by DPM value in descending order
@@ -90,7 +103,13 @@ def get_metric_rates(metric_value_url, username, api_key, metric_names, output_f
                 for metric_name, dpm in sorted_dpm
                 if float(dpm) > min_dpm
             ],
-            "total_metrics_above_threshold": sum(1 for _, dpm in sorted_dpm if float(dpm) > min_dpm)
+            "total_metrics_above_threshold": sum(1 for _, dpm in sorted_dpm if float(dpm) > min_dpm),
+            "performance_metrics": {
+                "total_runtime_seconds": round(total_time, 2),
+                "average_metric_processing_seconds": round(avg_metric_time, 3),
+                "total_metrics_processed": len(filtered_metrics),
+                "metrics_per_second": round(len(filtered_metrics)/total_time, 1)
+            }
         }
         with open("metric_rates.json", "w", encoding="utf-8") as f:
             json.dump(output_data, f, indent=2)
@@ -100,7 +119,7 @@ def get_metric_rates(metric_value_url, username, api_key, metric_names, output_f
     elif output_format == 'prom':
         output_filename = "metric_rates.prom"
         with open(output_filename, "w", encoding="utf-8") as f:
-            # Add HELP and TYPE metadata
+            # Add HELP and TYPE metadata for DPM metrics
             f.write("# HELP metric_dpm_rate Data points per minute for each metric\n")
             f.write("# TYPE metric_dpm_rate gauge\n")
             for metric_name, dpm in sorted_dpm:
@@ -112,6 +131,23 @@ def get_metric_rates(metric_value_url, username, api_key, metric_names, output_f
                         print(output_line, end='')
                     f.write(output_line)
                     metrics_above_threshold += 1
+            
+            # Add performance metrics
+            f.write("\n# HELP dpm_finder_runtime_seconds Total runtime of the DPM finder script\n")
+            f.write("# TYPE dpm_finder_runtime_seconds gauge\n")
+            f.write(f"dpm_finder_runtime_seconds {total_time}\n")
+            
+            f.write("\n# HELP dpm_finder_avg_metric_process_seconds Average time to process each metric\n")
+            f.write("# TYPE dpm_finder_avg_metric_process_seconds gauge\n")
+            f.write(f"dpm_finder_avg_metric_process_seconds {avg_metric_time}\n")
+            
+            f.write("\n# HELP dpm_finder_metrics_processed_total Total number of metrics processed\n")
+            f.write("# TYPE dpm_finder_metrics_processed_total counter\n")
+            f.write(f"dpm_finder_metrics_processed_total {len(filtered_metrics)}\n")
+            
+            f.write("\n# HELP dpm_finder_processing_rate_metrics_per_second Rate of metric processing\n")
+            f.write("# TYPE dpm_finder_processing_rate_metrics_per_second gauge\n")
+            f.write(f"dpm_finder_processing_rate_metrics_per_second {len(filtered_metrics)/total_time}\n")
     else:  # text/txt format
         output_filename = "metric_rates.txt"
         with open(output_filename, "w", encoding="utf-8") as f:
@@ -125,6 +161,13 @@ def get_metric_rates(metric_value_url, username, api_key, metric_names, output_f
                         print(output_line, end='')
                     f.write(output_line)
                     metrics_above_threshold += 1
+            
+            # Add timing information to the text output
+            f.write("\nPerformance Metrics:\n")
+            f.write(f"Total runtime: {total_time:.2f} seconds\n")
+            f.write(f"Average time per metric: {avg_metric_time:.3f} seconds\n")
+            f.write(f"Total metrics processed: {len(filtered_metrics)}\n")
+            f.write(f"Metrics processing rate: {len(filtered_metrics)/total_time:.1f} metrics/second\n")
     
     if not quiet:
         print(f"\nTotal number of metrics with DPM > {min_dpm}: {metrics_above_threshold}")
