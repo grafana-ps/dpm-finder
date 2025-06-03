@@ -30,7 +30,7 @@ def get_metric_names(url,username,api_key):
         raise SystemExit(e) from e
 
 
-def get_metric_rates(metric_value_url, username, api_key, metric_names, output_format='csv', min_dpm=1):
+def get_metric_rates(metric_value_url, username, api_key, metric_names, output_format='csv', min_dpm=1, quiet=False):
     """ 
     Calculate the metric rates
     Args:
@@ -40,15 +40,18 @@ def get_metric_rates(metric_value_url, username, api_key, metric_names, output_f
         metric_names: List of metric names to process
         output_format: Format to output results ('csv' or 'text')
         min_dpm: Minimum DPM threshold for showing metrics
+        quiet: If True, suppress progress output
     """
     dpm_data = {}
     filtered_metrics = [
         metric for metric in metric_names['data']
         if not any(metric.endswith(suffix) for suffix in ['_count', '_bucket', '_sum'])
       ]
-    print(f"Found {len(filtered_metrics)} metrics - checking for DPM")
+    if not quiet:
+        print(f"Found {len(filtered_metrics)} metrics - checking for DPM")
     for metric in filtered_metrics:
-        print(f".", end="", flush=True )
+        if not quiet:
+            print(f".", end="", flush=True)
         metric_name = metric
         query = 'count_over_time(%s{__ignore_usage__=""}[5m])/5'%(metric_name)
         query_response = requests.get(
@@ -62,7 +65,8 @@ def get_metric_rates(metric_value_url, username, api_key, metric_names, output_f
             dpm_data[metric_name] = query_data[0]['value'][1]
         else: 
             continue
-    print(f" Done \nFound {len(dpm_data)} metrics with DPM")
+    if not quiet:
+        print(f" Done \nFound {len(dpm_data)} metrics with DPM")
 
     metrics_above_threshold = 0
     # Sort items by DPM value in descending order
@@ -74,20 +78,24 @@ def get_metric_rates(metric_value_url, username, api_key, metric_names, output_f
             f.write("metric_name,dpm\n")
             for metric_name, dpm in sorted_dpm:
                 if float(dpm) > min_dpm:
-                    print(f"{metric_name},{dpm}")
+                    if not quiet:
+                        print(f"{metric_name},{dpm}")
                     f.write(f"{metric_name},{dpm}\n")
                     metrics_above_threshold += 1
     else:  # text format
-        print("\nMetrics and their DPM values:")
-        print("-" * 50)
+        if not quiet:
+            print("\nMetrics and their DPM values:")
+            print("-" * 50)
         for metric_name, dpm in sorted_dpm:
             if float(dpm) > min_dpm:
-                print(f"Metric: {metric_name}")
-                print(f"DPM: {dpm}")
-                print("-" * 50)
+                if not quiet:
+                    print(f"Metric: {metric_name}")
+                    print(f"DPM: {dpm}")
+                    print("-" * 50)
                 metrics_above_threshold += 1
     
-    print(f"\nTotal number of metrics with DPM > {min_dpm}: {metrics_above_threshold}")
+    if not quiet:
+        print(f"\nTotal number of metrics with DPM > {min_dpm}: {metrics_above_threshold}")
 
 
 def main(): 
@@ -98,25 +106,42 @@ def main():
         calculates their DPM, and outputs the results either in CSV or text format.
         Results are filtered to show only metrics above a specified DPM threshold.
         """,
-        formatter_class=argparse.RawDescriptionHelpFormatter
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        add_help=False  # Disable default help to add our own
     )
+    
+    # Add custom help option
     parser.add_argument(
-        '--format', 
+        '-h', '--help',
+        action='help',
+        default=argparse.SUPPRESS,
+        help='Show this help message and exit'
+    )
+
+    parser.add_argument(
+        '-f', '--format', 
         choices=['csv', 'text'],
         default='csv',
         help='Output format (default: csv)'
     )
     parser.add_argument(
-        '--min-dpm',
+        '-m', '--min-dpm',
         type=float,
         default=1.0,
         help='Minimum DPM threshold to show metrics (default: 1.0)'
     )
+    parser.add_argument(
+        '-q', '--quiet',
+        action='store_true',
+        help='Suppress progress output and only write results to file in CSV mode'
+    )
     args = parser.parse_args()
 
-    print(f"\nRunning with options:")
-    print(f"- Output format: {args.format}")
-    print(f"- Minimum DPM threshold: {args.min_dpm}\n")
+    if not args.quiet:
+        print(f"\nRunning with options:")
+        print(f"- Output format: {args.format}")
+        print(f"- Minimum DPM threshold: {args.min_dpm}")
+        print(f"- Quiet mode: {args.quiet}\n")
 
     load_dotenv()
     prometheus_endpoint=os.getenv("PROMETHEUS_ENDPOINT")
@@ -132,7 +157,8 @@ def main():
         api_key,
         metric_names,
         output_format=args.format,
-        min_dpm=args.min_dpm
+        min_dpm=args.min_dpm,
+        quiet=args.quiet
     )
 
 
