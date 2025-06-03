@@ -75,13 +75,13 @@ if __name__ == "__main__":
 
 
 def main(): 
-load_dotenv()
-prometheus_endpoint=os.getenv("PROMETHEUS_ENDPOINT")
-username=os.getenv("PROMETHEUS_USERNAME")
-api_key=os.getenv("PROMETHEUS_API_KEY")
-metric_value_url=f"{prometheus_endpoint}/api/prom/api/v1/query"
-metric_name_url=f"{prometheus_endpoint}/api/prom/api/v1/label/__name__/values"
+    load_dotenv()
+    prometheus_endpoint=os.getenv("PROMETHEUS_ENDPOINT")
+    username=os.getenv("PROMETHEUS_USERNAME")
+    api_key=os.getenv("PROMETHEUS_API_KEY")
+    metric_value_url=f"{prometheus_endpoint}/api/prom/api/v1/query"
+    metric_name_url=f"{prometheus_endpoint}/api/prom/api/v1/label/__name__/values"
 
 
-metric_names = get_metric_names(metric_name_url,username,api_key)
-get_metric_rates(metric_value_url,username,api_key,metric_names)
+    metric_names = get_metric_names(metric_name_url,username,api_key)
+    get_metric_rates(metric_value_url,username,api_key,metric_names)
