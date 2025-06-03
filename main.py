@@ -56,6 +56,7 @@ def get_metric_rates(url,username,api_key,metric_names):
             continue
     print(f" Done \nFound {len(dpm_data)} metrics with DPM")
 
+    metrics_above_one = 0
     with open("metric_rates.csv", "w", encoding="utf-8") as f:
         # Write CSV header
         f.write("metric_name,dpm\n")
@@ -65,6 +66,9 @@ def get_metric_rates(url,username,api_key,metric_names):
             if float(dpm) > 1:
                 print(f"{metric_name},{dpm}")
                 f.write(f"{metric_name},{dpm}\n")
+                metrics_above_one += 1
+    
+    print(f"\nTotal number of metrics with DPM > 1: {metrics_above_one}")
 
 
 
