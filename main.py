@@ -29,7 +29,7 @@ def get_metric_names(url,username,api_key):
         raise SystemExit(e) from e
 
 
-def get_metric_rates(url,username,api_key,metric_names):
+def get_metric_rates(metric_value_url,username,api_key,metric_names):
     """ 
     Calculate the metric rates
     """
@@ -71,13 +71,6 @@ def get_metric_rates(url,username,api_key,metric_names):
     print(f"\nTotal number of metrics with DPM > 1: {metrics_above_one}")
 
 
-
-
-
-if __name__ == "__main__":
-    main()
-
-
 def main(): 
     load_dotenv()
     prometheus_endpoint=os.getenv("PROMETHEUS_ENDPOINT")
@@ -89,3 +82,8 @@ def main():
 
     metric_names = get_metric_names(metric_name_url,username,api_key)
     get_metric_rates(metric_value_url,username,api_key,metric_names)
+
+
+
+if __name__ == "__main__":
+    main()
