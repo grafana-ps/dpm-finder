@@ -8,6 +8,9 @@ import os
 import time
 import argparse
 import requests
+import threading
+from queue import Queue
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from requests.auth import HTTPBasicAuth
 from dotenv import load_dotenv
 
@@ -30,6 +33,36 @@ def get_metric_names(url,username,api_key):
         print("There was an error retrieving the data")
         raise SystemExit(e) from e
 
+def process_metric_chunk(chunk, metric_value_url, username, api_key, results_queue, quiet=False):
+    """
+    Process a chunk of metrics and put results in the queue
+    """
+    chunk_results = {}
+    chunk_times = []
+    
+    for metric in chunk:
+        metric_start_time = time.time()
+        if not quiet:
+            print(".", end="", flush=True)
+        
+        query = 'count_over_time(%s{__ignore_usage__=""}[5m])/5'%(metric)
+        try:
+            query_response = requests.get(
+                metric_value_url,
+                auth=HTTPBasicAuth(username, api_key),
+                params={"query": query},
+                timeout=15,
+            )
+            query_data = query_response.json().get("data", {}).get("result", [])
+            if query_data and len(query_data) > 0 and len(query_data[0].get('value', [])) > 1:
+                chunk_results[metric] = query_data[0]['value'][1]
+        except Exception as e:
+            if not quiet:
+                print(f"\nError processing metric {metric}: {str(e)}")
+        
+        chunk_times.append(time.time() - metric_start_time)
+    
+    results_queue.put((chunk_results, chunk_times))
 
 def get_metric_rates(metric_value_url, username, api_key, metric_names, output_format='csv', min_dpm=1, quiet=False):
     """ 
@@ -40,7 +73,7 @@ def get_metric_rates(metric_value_url, username, api_key, metric_names, output_f
         api_key: Prometheus API key
         metric_names: List of metric names to process
         output_format: Format to output results ('csv', 'text'/'txt', 'json', or 'prom')
-        min_dpm: Minimum DPM threshold for showing metrics
+        min_dpm: Minimum DPM threshold to show metrics
         quiet: If True, suppress progress output
     """
     start_time = time.time()
@@ -48,27 +81,38 @@ def get_metric_rates(metric_value_url, username, api_key, metric_names, output_f
     filtered_metrics = [
         metric for metric in metric_names['data']
         if not any(metric.endswith(suffix) for suffix in ['_count', '_bucket', '_sum'])
-      ]
+    ]
+    
     if not quiet:
         print(f"Found {len(filtered_metrics)} metrics - checking for DPM")
     
+    # Create a queue for results
+    results_queue = Queue()
     processing_times = []
-    for metric in filtered_metrics:
-        metric_start_time = time.time()
-        if not quiet:
-            print(f".", end="", flush=True)
-        metric_name = metric
-        query = 'count_over_time(%s{__ignore_usage__=""}[5m])/5'%(metric_name)
-        query_response = requests.get(
-            metric_value_url,
-            auth=HTTPBasicAuth(username, api_key),
-            params={"query": query},
-            timeout=15,
+    
+    # Split metrics into chunks for parallel processing
+    chunk_size = 10  # Adjust this based on your Prometheus server's capacity
+    metric_chunks = [filtered_metrics[i:i + chunk_size] for i in range(0, len(filtered_metrics), chunk_size)]
+    
+    # Create and start threads for each chunk
+    threads = []
+    for chunk in metric_chunks:
+        thread = threading.Thread(
+            target=process_metric_chunk,
+            args=(chunk, metric_value_url, username, api_key, results_queue, quiet)
         )
-        query_data = query_response.json().get("data", {}).get("result", [])
-        if query_data and len(query_data) > 0 and len(query_data[0].get('value', [])) > 1:
-            dpm_data[metric_name] = query_data[0]['value'][1]
-        processing_times.append(time.time() - metric_start_time)
+        threads.append(thread)
+        thread.start()
+    
+    # Wait for all threads to complete
+    for thread in threads:
+        thread.join()
+    
+    # Collect results from queue
+    while not results_queue.empty():
+        chunk_results, chunk_times = results_queue.get()
+        dpm_data.update(chunk_results)
+        processing_times.extend(chunk_times)
 
     total_time = time.time() - start_time
     avg_metric_time = sum(processing_times) / len(processing_times) if processing_times else 0
@@ -172,7 +216,6 @@ def get_metric_rates(metric_value_url, username, api_key, metric_names, output_f
     if not quiet:
         print(f"\nTotal number of metrics with DPM > {min_dpm}: {metrics_above_threshold}")
 
-
 def main(): 
     parser = argparse.ArgumentParser(
         description="""
@@ -210,13 +253,20 @@ def main():
         action='store_true',
         help='Suppress progress output and only write results to file in CSV mode'
     )
+    parser.add_argument(
+        '-t', '--threads',
+        type=int,
+        default=10,
+        help='Number of concurrent threads for processing metrics (default: 10)'
+    )
     args = parser.parse_args()
 
     if not args.quiet:
         print(f"\nRunning with options:")
         print(f"- Output format: {args.format}")
         print(f"- Minimum DPM threshold: {args.min_dpm}")
-        print(f"- Quiet mode: {args.quiet}\n")
+        print(f"- Quiet mode: {args.quiet}")
+        print(f"- Thread count: {args.threads}\n")
 
     load_dotenv()
     prometheus_endpoint=os.getenv("PROMETHEUS_ENDPOINT")
@@ -235,8 +285,6 @@ def main():
         min_dpm=args.min_dpm,
         quiet=args.quiet
     )
-
-
 
 if __name__ == "__main__":
     main()
