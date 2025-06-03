@@ -38,7 +38,7 @@ def get_metric_rates(url,username,api_key,metric_names):
         metric for metric in metric_names['data']
         if not any(metric.endswith(suffix) for suffix in ['_count', '_bucket', '_sum'])
       ]
-    
+    print(f"Found {len(filtered_metrics)} metrics - checking for DPM")
     for metric in filtered_metrics:
         print(f".", end="", flush=True )
         metric_name = metric
@@ -54,6 +54,7 @@ def get_metric_rates(url,username,api_key,metric_names):
             dpm_data[metric_name] = query_data[0]['value'][1]
         else: 
             continue
+    print(f" Done \n Found {len(dpm_data)} metrics with DPM")
 
     with open("metric_rates.csv", "w", encoding="utf-8") as f:
         # Write CSV header
