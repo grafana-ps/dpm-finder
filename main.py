@@ -38,7 +38,6 @@ def get_metric_rates(url,username,api_key,metric_names):
         metric for metric in metric_names['data']
         if not any(metric.endswith(suffix) for suffix in ['_count', '_bucket', '_sum'])
       ]
-
     
     for metric in filtered_metrics:
         print(f".", end="", flush=True )
@@ -62,7 +61,7 @@ def get_metric_rates(url,username,api_key,metric_names):
         # Sort items by DPM value in descending order
         sorted_dpm = sorted(dpm_data.items(), key=lambda x: float(x[1]), reverse=True)
         for metric_name, dpm in sorted_dpm:
-            if float(dpm) > 0:
+            if float(dpm) > 1:
                 print(f"{metric_name},{dpm}")
                 f.write(f"{metric_name},{dpm}\n")
 
