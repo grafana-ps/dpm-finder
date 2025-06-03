@@ -38,7 +38,7 @@ def get_metric_rates(metric_value_url, username, api_key, metric_names, output_f
         username: Prometheus username
         api_key: Prometheus API key
         metric_names: List of metric names to process
-        output_format: Format to output results ('csv', 'text'/'txt', or 'json')
+        output_format: Format to output results ('csv', 'text'/'txt', 'json', or 'prom')
         min_dpm: Minimum DPM threshold for showing metrics
         quiet: If True, suppress progress output
     """
@@ -97,23 +97,33 @@ def get_metric_rates(metric_value_url, username, api_key, metric_names, output_f
             if not quiet:
                 print(json.dumps(output_data, indent=2))
         metrics_above_threshold = len(output_data["metrics"])
+    elif output_format == 'prom':
+        output_filename = "metric_rates.prom"
+        with open(output_filename, "w", encoding="utf-8") as f:
+            # Add HELP and TYPE metadata
+            f.write("# HELP metric_dpm_rate Data points per minute for each metric\n")
+            f.write("# TYPE metric_dpm_rate gauge\n")
+            for metric_name, dpm in sorted_dpm:
+                if float(dpm) > min_dpm:
+                    # Escape special characters in metric names as per Prometheus format
+                    safe_metric_name = metric_name.replace('-', '_').replace('.', '_').replace(':', '_')
+                    output_line = f'metric_dpm_rate{{metric_name="{safe_metric_name}"}} {dpm}\n'
+                    if not quiet:
+                        print(output_line, end='')
+                    f.write(output_line)
+                    metrics_above_threshold += 1
     else:  # text/txt format
         output_filename = "metric_rates.txt"
         with open(output_filename, "w", encoding="utf-8") as f:
             if not quiet:
                 print("\nMetrics and their DPM values:")
-                print("-" * 50)
             f.write("Metrics and their DPM values:\n")
-            f.write("-" * 50 + "\n")
             for metric_name, dpm in sorted_dpm:
                 if float(dpm) > min_dpm:
+                    output_line = f"{metric_name}: {dpm}\n"
                     if not quiet:
-                        print(f"Metric: {metric_name}")
-                        print(f"DPM: {dpm}")
-                        print("-" * 50)
-                    f.write(f"Metric: {metric_name}\n")
-                    f.write(f"DPM: {dpm}\n")
-                    f.write("-" * 50 + "\n")
+                        print(output_line, end='')
+                    f.write(output_line)
                     metrics_above_threshold += 1
     
     if not quiet:
@@ -142,7 +152,7 @@ def main():
 
     parser.add_argument(
         '-f', '--format', 
-        choices=['csv', 'text', 'txt', 'json'],
+        choices=['csv', 'text', 'txt', 'json', 'prom'],
         default='csv',
         help='Output format (default: csv). Note: "text" and "txt" are synonyms'
     )
