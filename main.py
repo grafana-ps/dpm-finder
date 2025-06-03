@@ -38,7 +38,7 @@ def get_metric_rates(metric_value_url, username, api_key, metric_names, output_f
         username: Prometheus username
         api_key: Prometheus API key
         metric_names: List of metric names to process
-        output_format: Format to output results ('csv' or 'text')
+        output_format: Format to output results ('csv', 'text'/'txt', or 'json')
         min_dpm: Minimum DPM threshold for showing metrics
         quiet: If True, suppress progress output
     """
@@ -82,17 +82,39 @@ def get_metric_rates(metric_value_url, username, api_key, metric_names, output_f
                         print(f"{metric_name},{dpm}")
                     f.write(f"{metric_name},{dpm}\n")
                     metrics_above_threshold += 1
-    else:  # text format
-        if not quiet:
-            print("\nMetrics and their DPM values:")
-            print("-" * 50)
-        for metric_name, dpm in sorted_dpm:
-            if float(dpm) > min_dpm:
-                if not quiet:
-                    print(f"Metric: {metric_name}")
-                    print(f"DPM: {dpm}")
-                    print("-" * 50)
-                metrics_above_threshold += 1
+    elif output_format == 'json':
+        import json
+        output_data = {
+            "metrics": [
+                {"metric_name": metric_name, "dpm": float(dpm)}
+                for metric_name, dpm in sorted_dpm
+                if float(dpm) > min_dpm
+            ],
+            "total_metrics_above_threshold": sum(1 for _, dpm in sorted_dpm if float(dpm) > min_dpm)
+        }
+        with open("metric_rates.json", "w", encoding="utf-8") as f:
+            json.dump(output_data, f, indent=2)
+            if not quiet:
+                print(json.dumps(output_data, indent=2))
+        metrics_above_threshold = len(output_data["metrics"])
+    else:  # text/txt format
+        output_filename = "metric_rates.txt"
+        with open(output_filename, "w", encoding="utf-8") as f:
+            if not quiet:
+                print("\nMetrics and their DPM values:")
+                print("-" * 50)
+            f.write("Metrics and their DPM values:\n")
+            f.write("-" * 50 + "\n")
+            for metric_name, dpm in sorted_dpm:
+                if float(dpm) > min_dpm:
+                    if not quiet:
+                        print(f"Metric: {metric_name}")
+                        print(f"DPM: {dpm}")
+                        print("-" * 50)
+                    f.write(f"Metric: {metric_name}\n")
+                    f.write(f"DPM: {dpm}\n")
+                    f.write("-" * 50 + "\n")
+                    metrics_above_threshold += 1
     
     if not quiet:
         print(f"\nTotal number of metrics with DPM > {min_dpm}: {metrics_above_threshold}")
@@ -120,9 +142,9 @@ def main():
 
     parser.add_argument(
         '-f', '--format', 
-        choices=['csv', 'text'],
+        choices=['csv', 'text', 'txt', 'json'],
         default='csv',
-        help='Output format (default: csv)'
+        help='Output format (default: csv). Note: "text" and "txt" are synonyms'
     )
     parser.add_argument(
         '-m', '--min-dpm',
