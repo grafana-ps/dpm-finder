@@ -1,3 +1,5 @@
+#!/usr/bin/env python3
+
 """
 main.py - calculate the DPM for a given prometheus cluster
 and return the results
@@ -31,29 +33,39 @@ def get_metric_rates(url,username,api_key,metric_names):
     """ 
     Calculate the metric rates
     """
+    dpm_data = {}
     filtered_metrics = [
         metric for metric in metric_names['data']
         if not any(metric.endswith(suffix) for suffix in ['_count', '_bucket', '_sum'])
       ]
 
-    with open("metric_rates.txt", "w", encoding="utf-8") as f:
-        for metric in filtered_metrics:
-            metric_name = metric
-            query = 'count_over_time(%s{__ignore_usage__=""}[5m])/5'%(metric_name)
-            query_response = requests.get(
-                metric_value_url,
-                auth=HTTPBasicAuth(username, api_key),
-                params={"query": query},
-                timeout=15,
-            )
-            query_data = query_response.json().get( "data", {}).get("result", [])
-            if query_data and len(query_data) > 0 and len(query_data[0].get('value', [])) > 1:
-                dpm = query_data[0]['value'][1]
-                if float(dpm) > 0:
-                    print(metric_name, dpm)
-                    f.write(f"{metric_name} {dpm}\n")
-            else:
-                continue
+    
+    for metric in filtered_metrics:
+        print(f".", end="", flush=True )
+        metric_name = metric
+        query = 'count_over_time(%s{__ignore_usage__=""}[5m])/5'%(metric_name)
+        query_response = requests.get(
+            metric_value_url,
+            auth=HTTPBasicAuth(username, api_key),
+            params={"query": query},
+            timeout=15,
+        )
+        query_data = query_response.json().get( "data", {}).get("result", [])
+        if query_data and len(query_data) > 0 and len(query_data[0].get('value', [])) > 1:
+            dpm_data[metric_name] = query_data[0]['value'][1]
+        else: 
+            continue
+
+    with open("metric_rates.csv", "w", encoding="utf-8") as f:
+        # Write CSV header
+        f.write("metric_name,dpm\n")
+        # Sort items by DPM value in descending order
+        sorted_dpm = sorted(dpm_data.items(), key=lambda x: float(x[1]), reverse=True)
+        for metric_name, dpm in sorted_dpm:
+            if float(dpm) > 0:
+                print(f"{metric_name},{dpm}")
+                f.write(f"{metric_name},{dpm}\n")
+
 
 load_dotenv()
 prometheus_endpoint=os.getenv("PROMETHEUS_ENDPOINT")
