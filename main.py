@@ -64,7 +64,7 @@ def process_metric_chunk(chunk, metric_value_url, username, api_key, results_que
     
     results_queue.put((chunk_results, chunk_times))
 
-def get_metric_rates(metric_value_url, username, api_key, metric_names, output_format='csv', min_dpm=1, quiet=False):
+def get_metric_rates(metric_value_url, username, api_key, metric_names, output_format='csv', min_dpm=1, quiet=False, thread_count=10):
     """ 
     Calculate the metric rates
     Args:
@@ -75,7 +75,11 @@ def get_metric_rates(metric_value_url, username, api_key, metric_names, output_f
         output_format: Format to output results ('csv', 'text'/'txt', 'json', or 'prom')
         min_dpm: Minimum DPM threshold to show metrics
         quiet: If True, suppress progress output
+        thread_count: Number of threads to use for processing (minimum: 1)
     """
+    # Ensure thread count is at least 1
+    thread_count = max(1, thread_count)
+    
     start_time = time.time()
     dpm_data = {}
     filtered_metrics = [
@@ -90,23 +94,31 @@ def get_metric_rates(metric_value_url, username, api_key, metric_names, output_f
     results_queue = Queue()
     processing_times = []
     
+    # Calculate chunk size based on number of metrics and threads
+    total_metrics = len(filtered_metrics)
+    chunk_size = max(1, total_metrics // thread_count)  # Ensure at least 1 metric per chunk
+    
     # Split metrics into chunks for parallel processing
-    chunk_size = 10  # Adjust this based on your Prometheus server's capacity
-    metric_chunks = [filtered_metrics[i:i + chunk_size] for i in range(0, len(filtered_metrics), chunk_size)]
+    metric_chunks = [filtered_metrics[i:i + chunk_size] for i in range(0, total_metrics, chunk_size)]
     
-    # Create and start threads for each chunk
-    threads = []
-    for chunk in metric_chunks:
-        thread = threading.Thread(
-            target=process_metric_chunk,
-            args=(chunk, metric_value_url, username, api_key, results_queue, quiet)
-        )
-        threads.append(thread)
-        thread.start()
+    if not quiet:
+        print(f"Processing {total_metrics} metrics in {len(metric_chunks)} chunks using {thread_count} threads")
     
-    # Wait for all threads to complete
-    for thread in threads:
-        thread.join()
+    # Create thread pool with the specified number of threads
+    with ThreadPoolExecutor(max_workers=thread_count) as executor:
+        # Submit tasks to the thread pool
+        futures = [
+            executor.submit(process_metric_chunk, chunk, metric_value_url, username, api_key, results_queue, quiet)
+            for chunk in metric_chunks
+        ]
+        
+        # Wait for all tasks to complete
+        for future in as_completed(futures):
+            try:
+                future.result()  # This will raise any exceptions that occurred in the thread
+            except Exception as e:
+                if not quiet:
+                    print(f"\nError in thread: {str(e)}")
     
     # Collect results from queue
     while not results_queue.empty():
@@ -118,12 +130,12 @@ def get_metric_rates(metric_value_url, username, api_key, metric_names, output_f
     avg_metric_time = sum(processing_times) / len(processing_times) if processing_times else 0
     
     if not quiet:
-        print(f" Done \nFound {len(dpm_data)} metrics with DPM")
         print(f"\nTiming Statistics:")
         print(f"Total runtime: {total_time:.2f} seconds")
         print(f"Average time per metric: {avg_metric_time:.3f} seconds")
         print(f"Total metrics processed: {len(filtered_metrics)}")
-        print(f"Metrics processing rate: {len(filtered_metrics)/total_time:.1f} metrics/second\n")
+        print(f"Metrics processing rate: {len(filtered_metrics)/total_time:.1f} metrics/second")
+        print(f"Effective threads used: {min(thread_count, len(metric_chunks))}\n")
 
     metrics_above_threshold = 0
     # Sort items by DPM value in descending order
@@ -257,9 +269,15 @@ def main():
         '-t', '--threads',
         type=int,
         default=10,
-        help='Number of concurrent threads for processing metrics (default: 10)'
+        help='Number of concurrent threads for processing metrics (minimum: 1, default: 10)'
     )
     args = parser.parse_args()
+
+    # Validate thread count
+    if args.threads < 1:
+        if not args.quiet:
+            print(f"Warning: Thread count {args.threads} is less than 1, setting to 1")
+        args.threads = 1
 
     if not args.quiet:
         print(f"\nRunning with options:")
@@ -283,7 +301,8 @@ def main():
         metric_names,
         output_format=args.format,
         min_dpm=args.min_dpm,
-        quiet=args.quiet
+        quiet=args.quiet,
+        thread_count=args.threads
     )
 
 if __name__ == "__main__":
