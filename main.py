@@ -14,24 +14,58 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from requests.auth import HTTPBasicAuth
 from dotenv import load_dotenv
 
-def get_metric_names(url,username,api_key):
+def make_request_with_retry(url, auth, params=None, max_retries=3, retry_delay=1, quiet=False):
+    """
+    Make HTTP request with retry logic for ConnectionResetError
+    Returns:
+        On success: requests.Response object
+        On failure: Exception object
+    """
+    for attempt in range(max_retries):
+        try:
+            response = requests.get(
+                url,
+                auth=auth,
+                params=params,
+                timeout=15,
+            )
+            response.raise_for_status()
+            return response
+        except ConnectionResetError as e:
+            if attempt < max_retries - 1:  # Don't sleep on the last attempt
+                if not quiet:
+                    print(f"\nConnection reset, retrying in {retry_delay} seconds... (Attempt {attempt + 1}/{max_retries})")
+                time.sleep(retry_delay)
+                retry_delay *= 2  # Exponential backoff
+            else:
+                return e  # Return the exception if we've exhausted all retries
+        except requests.exceptions.RequestException as e:
+            return e  # Return any other request exception
+
+def get_metric_json(url, username, api_key, quiet=False):
     """
     Get the metric names from the Prometheus API
+    Returns:
+        On success: Dictionary containing metric names
+        On failure: None
     """
-
+    response = make_request_with_retry(
+        url,
+        auth=HTTPBasicAuth(username, api_key),
+        quiet=quiet
+    )
+    
+    if isinstance(response, Exception):
+        if not quiet:
+            print(f"Error retrieving metric names: {str(response)}")
+        return None
+    
     try:
-        response = requests.get(
-                url,
-                auth=HTTPBasicAuth(username, api_key),
-                timeout=15,
-                )
-        response.raise_for_status()
-        data = response.json()
-        return data
-
-    except requests.exceptions.RequestException as e:  # This is the correct syntax
-        print("There was an error retrieving the data")
-        raise SystemExit(e) from e
+        return response.json()
+    except Exception as e:
+        if not quiet:
+            print(f"Error parsing metric names response: {str(e)}")
+        return None
 
 def process_metric_chunk(chunk, metric_value_url, username, api_key, results_queue, quiet=False):
     """
@@ -46,25 +80,32 @@ def process_metric_chunk(chunk, metric_value_url, username, api_key, results_que
             print(".", end="", flush=True)
         
         query = 'count_over_time(%s{__ignore_usage__=""}[5m])/5'%(metric)
+        response = make_request_with_retry(
+            metric_value_url,
+            auth=HTTPBasicAuth(username, api_key),
+            params={"query": query},
+            quiet=quiet
+        )
+        
+        if isinstance(response, Exception):
+            if not quiet:
+                print(f"\nError processing metric {metric}: {str(response)}")
+            chunk_times.append(time.time() - metric_start_time)
+            continue
+            
         try:
-            query_response = requests.get(
-                metric_value_url,
-                auth=HTTPBasicAuth(username, api_key),
-                params={"query": query},
-                timeout=15,
-            )
-            query_data = query_response.json().get("data", {}).get("result", [])
+            query_data = response.json().get("data", {}).get("result", [])
             if query_data and len(query_data) > 0 and len(query_data[0].get('value', [])) > 1:
                 chunk_results[metric] = query_data[0]['value'][1]
         except Exception as e:
             if not quiet:
-                print(f"\nError processing metric {metric}: {str(e)}")
+                print(f"\nError parsing response for metric {metric}: {str(e)}")
         
         chunk_times.append(time.time() - metric_start_time)
     
     results_queue.put((chunk_results, chunk_times))
 
-def get_metric_rates(metric_value_url, username, api_key, metric_names, output_format='csv', min_dpm=1, quiet=False, thread_count=10):
+def get_metric_rates(metric_value_url, username, api_key, metric_names, metric_aggregations, output_format='csv', min_dpm=1, quiet=False, thread_count=10):
     """ 
     Calculate the metric rates
     Args:
@@ -72,23 +113,52 @@ def get_metric_rates(metric_value_url, username, api_key, metric_names, output_f
         username: Prometheus username
         api_key: Prometheus API key
         metric_names: List of metric names to process
+        metric_aggregations: list of dictionaries of metric aggregation rules
         output_format: Format to output results ('csv', 'text'/'txt', 'json', or 'prom')
         min_dpm: Minimum DPM threshold to show metrics
         quiet: If True, suppress progress output
         thread_count: Number of threads to use for processing (minimum: 1)
+    Returns:
+        True if processing was successful, False otherwise
     """
     # Ensure thread count is at least 1
     thread_count = max(1, thread_count)
     
     start_time = time.time()
     dpm_data = {}
+    
+    if metric_names is None:
+        if not quiet:
+            print("Error: Failed to retrieve metric names")
+        return False
+    else:
+        if not quiet:
+            print(f"Found {len(metric_names['data'])} metrics")
+
+    # Create set of metrics that have aggregation rules
+    aggregated_metrics = set()
+    if metric_aggregations is not None:
+        try:
+            # Extract metric names from the aggregation rules
+            for rule in metric_aggregations:
+                if isinstance(rule, dict) and 'metric' in rule:
+                    aggregated_metrics.add(rule['metric'])
+            if not quiet:
+                print(f"Found {len(aggregated_metrics)} metrics with aggregation rules")
+
+        except Exception as e:
+            if not quiet:
+                print(f"Warning: Error processing aggregation rules: {str(e)}")
+    
+    # Filter metrics that don't end with _count, _bucket, _sum and are not in aggregation rules
     filtered_metrics = [
         metric for metric in metric_names['data']
         if not any(metric.endswith(suffix) for suffix in ['_count', '_bucket', '_sum'])
+        and metric not in aggregated_metrics
     ]
     
     if not quiet:
-        print(f"Found {len(filtered_metrics)} metrics - checking for DPM")
+        print(f"\nFiltered to {len(filtered_metrics)} metrics - checking for DPM")
     
     # Create a queue for results
     results_queue = Queue()
@@ -228,6 +298,8 @@ def get_metric_rates(metric_value_url, username, api_key, metric_names, output_f
     if not quiet:
         print(f"\nTotal number of metrics with DPM > {min_dpm}: {metrics_above_threshold}")
 
+    return True
+
 def main(): 
     parser = argparse.ArgumentParser(
         description="""
@@ -292,13 +364,21 @@ def main():
     api_key=os.getenv("PROMETHEUS_API_KEY")
     metric_value_url=f"{prometheus_endpoint}/api/prom/api/v1/query"
     metric_name_url=f"{prometheus_endpoint}/api/prom/api/v1/label/__name__/values"
+    metric_aggregation_url=f"{prometheus_endpoint}/aggregations/rules"
 
-    metric_names = get_metric_names(metric_name_url,username,api_key)
+
+    metric_names = get_metric_json(metric_name_url,username,api_key)
+    metric_aggregations = get_metric_json(metric_aggregation_url,username,api_key)
+
+
+
+
     get_metric_rates(
         metric_value_url,
         username,
         api_key,
         metric_names,
+        metric_aggregations,
         output_format=args.format,
         min_dpm=args.min_dpm,
         quiet=args.quiet,
