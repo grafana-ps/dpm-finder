@@ -6,6 +6,10 @@ __pycache__/
 # C extensions
 *.so
 
+#emacs
+*~  
+
+
 # Distribution / packaging
 .Python
 build/
@@ -175,3 +179,8 @@ cython_debug/
 
 # DPM-specific files
 metric_rates.txt
+metric_rates.csv
+metric_rates.prom
+metric_rates.json
+
+
