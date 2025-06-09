@@ -47,6 +47,7 @@ python3 -m pip install -r requirements.txt
 
 ## Usage
 
+```bash
 usage: dpm-finder.py [-h] [-f {csv,text,txt,json,prom}] [-m MIN_DPM] [-q] [-t THREADS]
 
         DPM Finder - A tool to calculate Data Points per Minute (DPM) for Prometheus metrics.
@@ -64,7 +65,7 @@ optional arguments:
   -q, --quiet           Suppress progress output and only write results to file in CSV mode
   -t THREADS, --threads THREADS
                         Number of concurrent threads for processing metrics (minimum: 1, default: 10)
-
+```
 ## Notes
 
 Adjust threads upwards to utilize more parallelism for potentially faster run times. 
