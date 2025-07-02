@@ -10,13 +10,46 @@ import argparse
 import requests
 import threading
 import logging
+import signal
+import sys
 from queue import Queue
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from requests.auth import HTTPBasicAuth
 from dotenv import load_dotenv
+from prometheus_client import Gauge, Counter, Info, start_http_server, CollectorRegistry, REGISTRY
 
 # Set up module-level logger
 logger = logging.getLogger(__name__)
+
+# Global variables for exporter mode
+shutdown_event = threading.Event()
+
+# Prometheus metrics
+dpm_metric = Gauge('metric_dpm_rate', 'Data points per minute for each metric', ['metric_name'])
+runtime_metric = Gauge('dpm_finder_runtime_seconds', 'Total runtime of the last DPM calculation')
+avg_processing_time_metric = Gauge('dpm_finder_avg_metric_process_seconds', 'Average time to process each metric')
+metrics_processed_metric = Counter('dpm_finder_metrics_processed_total', 'Total number of metrics processed')
+processing_rate_metric = Gauge('dpm_finder_processing_rate_metrics_per_second', 'Rate of metric processing')
+last_update_metric = Gauge('dpm_finder_last_update_timestamp', 'Unix timestamp of last metrics update')
+exporter_info = Info('dpm_finder_exporter', 'Information about the DPM finder exporter')
+
+def update_prometheus_metrics(filtered_dpm, performance_data):
+    """Update Prometheus metrics with latest DPM data"""
+    # Clear existing DPM metrics
+    dpm_metric.clear()
+    
+    # Update DPM metrics for each metric
+    for metric_name, dpm_value in filtered_dpm.items():
+        # Create safe metric name for label
+        safe_metric_name = metric_name.replace('-', '_').replace('.', '_').replace(':', '_')
+        dpm_metric.labels(metric_name=safe_metric_name).set(float(dpm_value))
+    
+    # Update performance metrics
+    runtime_metric.set(performance_data['total_time'])
+    avg_processing_time_metric.set(performance_data['avg_metric_time'])
+    metrics_processed_metric._value._value = performance_data['total_metrics']  # Reset counter to current value
+    processing_rate_metric.set(performance_data['processing_rate'])
+    last_update_metric.set(performance_data['last_update'])
 
 def make_request_with_retry(url, auth, params=None, max_retries=10, retry_delay=2, quiet=False):
     """
@@ -111,7 +144,7 @@ def process_metric_chunk(chunk, metric_value_url, username, api_key, results_que
     
     results_queue.put((chunk_results, chunk_times))
 
-def get_metric_rates(metric_value_url, username, api_key, metric_names, metric_aggregations, output_format='csv', min_dpm=1, quiet=False, thread_count=10):
+def get_metric_rates(metric_value_url, username, api_key, metric_names, metric_aggregations, output_format='csv', min_dpm=1, quiet=False, thread_count=10, exporter_mode=False):
     """ 
     Calculate the metric rates
     Args:
@@ -124,6 +157,7 @@ def get_metric_rates(metric_value_url, username, api_key, metric_names, metric_a
         min_dpm: Minimum DPM threshold to show metrics
         quiet: If True, suppress progress output
         thread_count: Number of threads to use for processing (minimum: 1)
+        exporter_mode: If True, calculate metrics for exporter mode
     Returns:
         True if processing was successful, False otherwise
     """
@@ -218,25 +252,40 @@ def get_metric_rates(metric_value_url, username, api_key, metric_names, metric_a
     # Sort items by DPM value in descending order
     sorted_dpm = sorted(dpm_data.items(), key=lambda x: float(x[1]), reverse=True)
     
+    # Filter metrics above threshold
+    filtered_dpm = {metric_name: dpm for metric_name, dpm in sorted_dpm if float(dpm) > min_dpm}
+    metrics_above_threshold = len(filtered_dpm)
+    
+    if exporter_mode:
+        # Update Prometheus metrics for exporter mode
+        performance_data = {
+            'total_time': total_time,
+            'avg_metric_time': avg_metric_time,
+            'total_metrics': len(filtered_metrics),
+            'processing_rate': len(filtered_metrics)/total_time if total_time > 0 else 0,
+            'last_update': time.time()
+        }
+        update_prometheus_metrics(filtered_dpm, performance_data)
+        if not quiet:
+            logger.info(f"Updated exporter metrics: {metrics_above_threshold} metrics above threshold")
+        return True
+    
     if output_format == 'csv':
         with open("metric_rates.csv", "w", encoding="utf-8") as f:
             # Write CSV header
             f.write("metric_name,dpm\n")
-            for metric_name, dpm in sorted_dpm:
-                if float(dpm) > min_dpm:
-                    if not quiet:
-                        print(f"{metric_name},{dpm}")
-                    f.write(f"{metric_name},{dpm}\n")
-                    metrics_above_threshold += 1
+            for metric_name, dpm in filtered_dpm.items():
+                if not quiet:
+                    print(f"{metric_name},{dpm}")
+                f.write(f"{metric_name},{dpm}\n")
     elif output_format == 'json':
         import json
         output_data = {
             "metrics": [
                 {"metric_name": metric_name, "dpm": float(dpm)}
-                for metric_name, dpm in sorted_dpm
-                if float(dpm) > min_dpm
+                for metric_name, dpm in filtered_dpm.items()
             ],
-            "total_metrics_above_threshold": sum(1 for _, dpm in sorted_dpm if float(dpm) > min_dpm),
+            "total_metrics_above_threshold": metrics_above_threshold,
             "performance_metrics": {
                 "total_runtime_seconds": round(total_time, 2),
                 "average_metric_processing_seconds": round(avg_metric_time, 3),
@@ -248,22 +297,19 @@ def get_metric_rates(metric_value_url, username, api_key, metric_names, metric_a
             json.dump(output_data, f, indent=2)
             if not quiet:
                 print(json.dumps(output_data, indent=2))
-        metrics_above_threshold = len(output_data["metrics"])
     elif output_format == 'prom':
         output_filename = "metric_rates.prom"
         with open(output_filename, "w", encoding="utf-8") as f:
             # Add HELP and TYPE metadata for DPM metrics
             f.write("# HELP metric_dpm_rate Data points per minute for each metric\n")
             f.write("# TYPE metric_dpm_rate gauge\n")
-            for metric_name, dpm in sorted_dpm:
-                if float(dpm) > min_dpm:
-                    # Escape special characters in metric names as per Prometheus format
-                    safe_metric_name = metric_name.replace('-', '_').replace('.', '_').replace(':', '_')
-                    output_line = f'metric_dpm_rate{{metric_name="{safe_metric_name}"}} {dpm}\n'
-                    if not quiet:
-                        print(output_line, end='')
-                    f.write(output_line)
-                    metrics_above_threshold += 1
+            for metric_name, dpm in filtered_dpm.items():
+                # Escape special characters in metric names as per Prometheus format
+                safe_metric_name = metric_name.replace('-', '_').replace('.', '_').replace(':', '_')
+                output_line = f'metric_dpm_rate{{metric_name="{safe_metric_name}"}} {dpm}\n'
+                if not quiet:
+                    print(output_line, end='')
+                f.write(output_line)
             
             # Add performance metrics
             f.write("\n# HELP dpm_finder_runtime_seconds Total runtime of the DPM finder script\n")
@@ -287,13 +333,11 @@ def get_metric_rates(metric_value_url, username, api_key, metric_names, metric_a
             if not quiet:
                 print("\nMetrics and their DPM values:")
             f.write("Metrics and their DPM values:\n")
-            for metric_name, dpm in sorted_dpm:
-                if float(dpm) > min_dpm:
-                    output_line = f"{metric_name}: {dpm}\n"
-                    if not quiet:
-                        print(output_line, end='')
-                    f.write(output_line)
-                    metrics_above_threshold += 1
+            for metric_name, dpm in filtered_dpm.items():
+                output_line = f"{metric_name}: {dpm}\n"
+                if not quiet:
+                    print(output_line, end='')
+                f.write(output_line)
             
             # Add timing information to the text output
             f.write("\nPerformance Metrics:\n")
@@ -306,6 +350,98 @@ def get_metric_rates(metric_value_url, username, api_key, metric_names, metric_a
         logger.info(f"Total number of metrics with DPM > {min_dpm}: {metrics_above_threshold}")
 
     return True
+
+def run_metrics_updater(metric_value_url, metric_name_url, metric_aggregation_url, username, api_key, 
+                       min_dpm, thread_count, update_interval, quiet):
+    """
+    Run periodic metrics updates for exporter mode
+    """
+    logger.info(f"Starting metrics updater with {update_interval}s interval")
+    
+    while not shutdown_event.is_set():
+        try:
+            logger.debug("Fetching metrics for update...")
+            
+            # Get fresh metric data
+            metric_names = get_metric_json(metric_name_url, username, api_key, quiet=True)
+            metric_aggregations = get_metric_json(metric_aggregation_url, username, api_key, quiet=True)
+            
+            if metric_names is not None:
+                # Calculate metrics in exporter mode
+                get_metric_rates(
+                    metric_value_url,
+                    username,
+                    api_key,
+                    metric_names,
+                    metric_aggregations,
+                    min_dpm=min_dpm,
+                    quiet=True,  # Always quiet for background updates
+                    thread_count=thread_count,
+                    exporter_mode=True
+                )
+                logger.debug("Metrics updated successfully")
+            else:
+                logger.error("Failed to fetch metric names during update")
+            
+        except Exception as e:
+            logger.error(f"Error during metrics update: {e}")
+        
+        # Wait for next update or shutdown
+        if shutdown_event.wait(timeout=update_interval):
+            break
+    
+    logger.info("Metrics updater stopped")
+
+def run_exporter(port, metric_value_url, metric_name_url, metric_aggregation_url, username, api_key,
+                min_dpm, thread_count, update_interval, quiet):
+    """
+    Run the Prometheus exporter server
+    """
+    def signal_handler(signum, frame):
+        logger.info(f"Received signal {signum}, shutting down...")
+        shutdown_event.set()
+        sys.exit(0)
+    
+    # Set up signal handlers
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
+    
+    # Set exporter info
+    exporter_info.info({
+        'version': '1.0.0',
+        'min_dpm_threshold': str(min_dpm),
+        'update_interval_seconds': str(update_interval),
+        'thread_count': str(thread_count)
+    })
+    
+    # Start metrics updater thread
+    updater_thread = threading.Thread(
+        target=run_metrics_updater,
+        args=(metric_value_url, metric_name_url, metric_aggregation_url, username, api_key,
+              min_dpm, thread_count, update_interval, quiet),
+        daemon=True
+    )
+    updater_thread.start()
+    
+    # Start HTTP server using prometheus_client
+    logger.info(f"Starting DPM finder exporter on port {port}")
+    logger.info(f"Metrics available at: http://localhost:{port}/metrics")
+    
+    try:
+        start_http_server(port)
+        logger.info("Exporter server started successfully")
+        
+        # Keep the main thread alive
+        while not shutdown_event.is_set():
+            time.sleep(1)
+            
+    except Exception as e:
+        logger.error(f"Error starting exporter server: {e}")
+        sys.exit(1)
+    except KeyboardInterrupt:
+        logger.info("Shutting down server...")
+    finally:
+        shutdown_event.set()
 
 def main(): 
     # Set up logging
@@ -363,6 +499,23 @@ def main():
         default=10,
         help='Number of concurrent threads for processing metrics (minimum: 1, default: 10)'
     )
+    parser.add_argument(
+        '--exporter',
+        action='store_true',
+        help='Run as a Prometheus exporter server instead of one-time execution'
+    )
+    parser.add_argument(
+        '--port',
+        type=int,
+        default=8000,
+        help='Port to run the exporter server on (default: 8000)'
+    )
+    parser.add_argument(
+        '--update-interval',
+        type=int,
+        default=86400,
+        help='How often to update metrics in exporter mode, in seconds (default: 86400 or 1 day)'
+    )
     args = parser.parse_args()
 
     # Set logging level based on arguments
@@ -378,10 +531,24 @@ def main():
         if not args.quiet:
             logger.warning(f"Thread count {args.threads} is less than 1, setting to 1")
         args.threads = 1
+    
+    # Validate update interval for exporter mode
+    if args.exporter and args.update_interval < 30:
+        logger.warning(f"Update interval {args.update_interval}s is very short, consider using 30s or more")
+    
+    # Validate port
+    if args.exporter and (args.port < 1 or args.port > 65535):
+        logger.error(f"Invalid port {args.port}, must be between 1 and 65535")
+        sys.exit(1)
 
     if not args.quiet:
-        logger.info("Running with options:")
-        logger.info(f"- Output format: {args.format}")
+        if args.exporter:
+            logger.info("Running in exporter mode:")
+            logger.info(f"- Port: {args.port}")
+            logger.info(f"- Update interval: {args.update_interval}s")
+        else:
+            logger.info("Running in one-time mode:")
+            logger.info(f"- Output format: {args.format}")
         logger.info(f"- Minimum DPM threshold: {args.min_dpm}")
         logger.info(f"- Quiet mode: {args.quiet}")
         logger.info(f"- Verbose mode: {args.verbose}")
@@ -398,17 +565,33 @@ def main():
     metric_names = get_metric_json(metric_name_url, username, api_key, quiet=args.quiet)
     metric_aggregations = get_metric_json(metric_aggregation_url, username, api_key, quiet=args.quiet)
 
-    get_metric_rates(
-        metric_value_url,
-        username,
-        api_key,
-        metric_names,
-        metric_aggregations,
-        output_format=args.format,
-        min_dpm=args.min_dpm,
-        quiet=args.quiet,
-        thread_count=args.threads
-    )
+    if args.exporter:
+        # Run as Prometheus exporter
+        run_exporter(
+            port=args.port,
+            metric_value_url=metric_value_url,
+            metric_name_url=metric_name_url,
+            metric_aggregation_url=metric_aggregation_url,
+            username=username,
+            api_key=api_key,
+            min_dpm=args.min_dpm,
+            thread_count=args.threads,
+            update_interval=args.update_interval,
+            quiet=args.quiet
+        )
+    else:
+        # Run one-time execution
+        get_metric_rates(
+            metric_value_url,
+            username,
+            api_key,
+            metric_names,
+            metric_aggregations,
+            output_format=args.format,
+            min_dpm=args.min_dpm,
+            quiet=args.quiet,
+            thread_count=args.threads
+        )
 
 if __name__ == "__main__":
     main()
