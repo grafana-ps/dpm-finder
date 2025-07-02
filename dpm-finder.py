@@ -9,12 +9,16 @@ import time
 import argparse
 import requests
 import threading
+import logging
 from queue import Queue
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from requests.auth import HTTPBasicAuth
 from dotenv import load_dotenv
 
-def make_request_with_retry(url, auth, params=None, max_retries=3, retry_delay=1, quiet=False):
+# Set up module-level logger
+logger = logging.getLogger(__name__)
+
+def make_request_with_retry(url, auth, params=None, max_retries=10, retry_delay=2, quiet=False):
     """
     Make HTTP request with retry logic for ConnectionResetError
     Returns:
@@ -34,12 +38,14 @@ def make_request_with_retry(url, auth, params=None, max_retries=3, retry_delay=1
         except ConnectionResetError as e:
             if attempt < max_retries - 1:  # Don't sleep on the last attempt
                 if not quiet:
-                    print(f"\nConnection reset, retrying in {retry_delay} seconds... (Attempt {attempt + 1}/{max_retries})")
+                    logger.warning(f"Connection reset, retrying in {retry_delay} seconds... (Attempt {attempt + 1}/{max_retries})")
                 time.sleep(retry_delay)
                 retry_delay *= 2  # Exponential backoff
             else:
                 return e  # Return the exception if we've exhausted all retries
         except requests.exceptions.RequestException as e:
+            if not quiet:
+                logger.error(f"Error making request: {str(e)}") 
             return e  # Return any other request exception
 
 def get_metric_json(url, username, api_key, quiet=False):
@@ -57,14 +63,14 @@ def get_metric_json(url, username, api_key, quiet=False):
     
     if isinstance(response, Exception):
         if not quiet:
-            print(f"Error retrieving metric names: {str(response)}")
+            logger.error(f"Error retrieving metric names: {str(response)}")
         return None
     
     try:
         return response.json()
     except Exception as e:
         if not quiet:
-            print(f"Error parsing metric names response: {str(e)}")
+            logger.error(f"Error parsing metric names response: {str(e)}")
         return None
 
 def process_metric_chunk(chunk, metric_value_url, username, api_key, results_queue, quiet=False):
@@ -77,7 +83,7 @@ def process_metric_chunk(chunk, metric_value_url, username, api_key, results_que
     for metric in chunk:
         metric_start_time = time.time()
         if not quiet:
-            print(".", end="", flush=True)
+            logger.debug(f"Processing metric: {metric}")
         
         query = 'count_over_time(%s{__ignore_usage__=""}[5m])/5'%(metric)
         response = make_request_with_retry(
@@ -89,7 +95,7 @@ def process_metric_chunk(chunk, metric_value_url, username, api_key, results_que
         
         if isinstance(response, Exception):
             if not quiet:
-                print(f"\nError processing metric {metric}: {str(response)}")
+                logger.error(f"Error processing metric {metric}: {str(response)}")
             chunk_times.append(time.time() - metric_start_time)
             continue
             
@@ -99,7 +105,7 @@ def process_metric_chunk(chunk, metric_value_url, username, api_key, results_que
                 chunk_results[metric] = query_data[0]['value'][1]
         except Exception as e:
             if not quiet:
-                print(f"\nError parsing response for metric {metric}: {str(e)}")
+                logger.error(f"Error parsing response for metric {metric}: {str(e)}")
         
         chunk_times.append(time.time() - metric_start_time)
     
@@ -129,11 +135,11 @@ def get_metric_rates(metric_value_url, username, api_key, metric_names, metric_a
     
     if metric_names is None:
         if not quiet:
-            print("Error: Failed to retrieve metric names")
+            logger.error("Failed to retrieve metric names")
         return False
     else:
         if not quiet:
-            print(f"Found {len(metric_names['data'])} metrics")
+            logger.info(f"Found {len(metric_names['data'])} metrics")
 
     # Create set of metrics that have aggregation rules
     aggregated_metrics = set()
@@ -144,21 +150,22 @@ def get_metric_rates(metric_value_url, username, api_key, metric_names, metric_a
                 if isinstance(rule, dict) and 'metric' in rule:
                     aggregated_metrics.add(rule['metric'])
             if not quiet:
-                print(f"Found {len(aggregated_metrics)} metrics with aggregation rules")
+                logger.info(f"Found {len(aggregated_metrics)} metrics with aggregation rules")
 
         except Exception as e:
             if not quiet:
-                print(f"Warning: Error processing aggregation rules: {str(e)}")
+                logger.warning(f"Error processing aggregation rules: {str(e)}")
     
-    # Filter metrics that don't end with _count, _bucket, _sum and are not in aggregation rules
+    # Filter metrics that don't end with _count, _bucket, _sum, don't begin with grafana_, and are not in aggregation rules
     filtered_metrics = [
         metric for metric in metric_names['data']
         if not any(metric.endswith(suffix) for suffix in ['_count', '_bucket', '_sum'])
+        and not metric.startswith('grafana_')
         and metric not in aggregated_metrics
     ]
     
     if not quiet:
-        print(f"\nFiltered to {len(filtered_metrics)} metrics - checking for DPM")
+        logger.info(f"Filtered to {len(filtered_metrics)} metrics - checking for DPM")
     
     # Create a queue for results
     results_queue = Queue()
@@ -172,7 +179,7 @@ def get_metric_rates(metric_value_url, username, api_key, metric_names, metric_a
     metric_chunks = [filtered_metrics[i:i + chunk_size] for i in range(0, total_metrics, chunk_size)]
     
     if not quiet:
-        print(f"Processing {total_metrics} metrics in {len(metric_chunks)} chunks using {thread_count} threads")
+        logger.info(f"Processing {total_metrics} metrics in {len(metric_chunks)} chunks using {thread_count} threads")
     
     # Create thread pool with the specified number of threads
     with ThreadPoolExecutor(max_workers=thread_count) as executor:
@@ -188,7 +195,7 @@ def get_metric_rates(metric_value_url, username, api_key, metric_names, metric_a
                 future.result()  # This will raise any exceptions that occurred in the thread
             except Exception as e:
                 if not quiet:
-                    print(f"\nError in thread: {str(e)}")
+                    logger.error(f"Error in thread: {str(e)}")
     
     # Collect results from queue
     while not results_queue.empty():
@@ -200,12 +207,12 @@ def get_metric_rates(metric_value_url, username, api_key, metric_names, metric_a
     avg_metric_time = sum(processing_times) / len(processing_times) if processing_times else 0
     
     if not quiet:
-        print(f"\nTiming Statistics:")
-        print(f"Total runtime: {total_time:.2f} seconds")
-        print(f"Average time per metric: {avg_metric_time:.3f} seconds")
-        print(f"Total metrics processed: {len(filtered_metrics)}")
-        print(f"Metrics processing rate: {len(filtered_metrics)/total_time:.1f} metrics/second")
-        print(f"Effective threads used: {min(thread_count, len(metric_chunks))}\n")
+        logger.info("Timing Statistics:")
+        logger.info(f"Total runtime: {total_time:.2f} seconds")
+        logger.info(f"Average time per metric: {avg_metric_time:.3f} seconds")
+        logger.info(f"Total metrics processed: {len(filtered_metrics)}")
+        logger.info(f"Metrics processing rate: {len(filtered_metrics)/total_time:.1f} metrics/second")
+        logger.info(f"Effective threads used: {min(thread_count, len(metric_chunks))}")
 
     metrics_above_threshold = 0
     # Sort items by DPM value in descending order
@@ -296,11 +303,19 @@ def get_metric_rates(metric_value_url, username, api_key, metric_names, metric_a
             f.write(f"Metrics processing rate: {len(filtered_metrics)/total_time:.1f} metrics/second\n")
     
     if not quiet:
-        print(f"\nTotal number of metrics with DPM > {min_dpm}: {metrics_above_threshold}")
+        logger.info(f"Total number of metrics with DPM > {min_dpm}: {metrics_above_threshold}")
 
     return True
 
 def main(): 
+    # Set up logging
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(levelname)s - %(message)s',
+        datefmt='%Y-%m-%d %H:%M:%S'
+    )
+    logger = logging.getLogger(__name__)
+    
     parser = argparse.ArgumentParser(
         description="""
         DPM Finder - A tool to calculate Data Points per Minute (DPM) for Prometheus metrics.
@@ -338,6 +353,11 @@ def main():
         help='Suppress progress output and only write results to file in CSV mode'
     )
     parser.add_argument(
+        '-v', '--verbose',
+        action='store_true',
+        help='Enable debug logging for detailed output'
+    )
+    parser.add_argument(
         '-t', '--threads',
         type=int,
         default=10,
@@ -345,18 +365,27 @@ def main():
     )
     args = parser.parse_args()
 
+    # Set logging level based on arguments
+    if args.quiet:
+        logging.getLogger().setLevel(logging.ERROR)
+    elif args.verbose:
+        logging.getLogger().setLevel(logging.DEBUG)
+    else:
+        logging.getLogger().setLevel(logging.INFO)
+
     # Validate thread count
     if args.threads < 1:
         if not args.quiet:
-            print(f"Warning: Thread count {args.threads} is less than 1, setting to 1")
+            logger.warning(f"Thread count {args.threads} is less than 1, setting to 1")
         args.threads = 1
 
     if not args.quiet:
-        print(f"\nRunning with options:")
-        print(f"- Output format: {args.format}")
-        print(f"- Minimum DPM threshold: {args.min_dpm}")
-        print(f"- Quiet mode: {args.quiet}")
-        print(f"- Thread count: {args.threads}\n")
+        logger.info("Running with options:")
+        logger.info(f"- Output format: {args.format}")
+        logger.info(f"- Minimum DPM threshold: {args.min_dpm}")
+        logger.info(f"- Quiet mode: {args.quiet}")
+        logger.info(f"- Verbose mode: {args.verbose}")
+        logger.info(f"- Thread count: {args.threads}")
 
     load_dotenv()
     prometheus_endpoint=os.getenv("PROMETHEUS_ENDPOINT")
@@ -366,12 +395,8 @@ def main():
     metric_name_url=f"{prometheus_endpoint}/api/prom/api/v1/label/__name__/values"
     metric_aggregation_url=f"{prometheus_endpoint}/aggregations/rules"
 
-
-    metric_names = get_metric_json(metric_name_url,username,api_key)
-    metric_aggregations = get_metric_json(metric_aggregation_url,username,api_key)
-
-
-
+    metric_names = get_metric_json(metric_name_url, username, api_key, quiet=args.quiet)
+    metric_aggregations = get_metric_json(metric_aggregation_url, username, api_key, quiet=args.quiet)
 
     get_metric_rates(
         metric_value_url,
