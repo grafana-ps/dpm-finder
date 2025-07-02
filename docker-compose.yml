@@ -1,0 +1,37 @@
+services:
+  dpm-finder:
+    build: .
+    image: dpm-finder:latest
+    container_name: dpm-finder
+    restart: unless-stopped
+    ports:
+      - "9966:9966"
+    environment:
+      - PROMETHEUS_ENDPOINT=${PROMETHEUS_ENDPOINT}
+      - PROMETHEUS_USERNAME=${PROMETHEUS_USERNAME}
+      - PROMETHEUS_API_KEY=${PROMETHEUS_API_KEY}
+    command: ["--exporter", "--port", "9966", "--update-interval", "86400"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import requests; requests.get('http://localhost:9966/metrics', timeout=5)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    # Uncomment to mount local .env file
+    # volumes:
+    #   - ./.env:/app/.env:ro
+    
+  # Example one-time execution service
+  dpm-finder-oneshot:
+    build: .
+    image: dpm-finder:latest
+    container_name: dpm-finder-oneshot
+    environment:
+      - PROMETHEUS_ENDPOINT=${PROMETHEUS_ENDPOINT}
+      - PROMETHEUS_USERNAME=${PROMETHEUS_USERNAME}
+      - PROMETHEUS_API_KEY=${PROMETHEUS_API_KEY}
+    command: ["--format", "csv", "--min-dpm", "2.0", "--threads", "8"]
+    volumes:
+      - ./output:/app/output
+    profiles:
+      - oneshot  # Only start with: docker-compose --profile oneshot up 

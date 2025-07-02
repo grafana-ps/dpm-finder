@@ -1,0 +1,43 @@
+# Git
+.git
+.gitignore
+
+# Python
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.Python
+venv/
+.venv/
+env/
+.env
+.env.*
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Output files
+*.csv
+*.json
+*.txt
+*.prom
+metric_rates.*
+
+# Logs
+*.log
+
+# Documentation (except README.md)
+docs/
+*.md
+!README.md
+
+# License (already in image)
+LICENSE 

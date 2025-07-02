@@ -62,6 +62,280 @@ python3 -m pip install -r requirements.txt
 ./dpm-finder.py -e -p 9966
 ```
 
+## Docker Usage
+
+The dpm-finder can be run as a Docker container for easy deployment and isolation.
+
+### Building the Docker Image
+
+```bash
+# Build the image
+docker build -t dpm-finder:latest .
+
+# Or build with a specific tag
+docker build -t dpm-finder:v1.0.0 .
+```
+
+### Running with Docker
+
+#### Environment Variables
+
+Set your Prometheus credentials as environment variables:
+
+```bash
+export PROMETHEUS_ENDPOINT="https://prometheus-prod-13-prod-us-east-0.grafana.net"
+export PROMETHEUS_USERNAME="1234567"
+export PROMETHEUS_API_KEY="glc_key-example-..."
+```
+
+#### Exporter Mode 
+
+```bash
+# Run as Prometheus exporter (default)
+docker run -d \
+  --name dpm-finder \
+  -p 9966:9966 \
+  -e PROMETHEUS_ENDPOINT="${PROMETHEUS_ENDPOINT}" \
+  -e PROMETHEUS_USERNAME="${PROMETHEUS_USERNAME}" \
+  -e PROMETHEUS_API_KEY="${PROMETHEUS_API_KEY}" \
+  dpm-finder:latest
+
+# With custom options
+docker run -d \
+  --name dpm-finder \
+  -p 8080:8080 \
+  -e PROMETHEUS_ENDPOINT="${PROMETHEUS_ENDPOINT}" \
+  -e PROMETHEUS_USERNAME="${PROMETHEUS_USERNAME}" \
+  -e PROMETHEUS_API_KEY="${PROMETHEUS_API_KEY}" \
+  dpm-finder:latest --exporter --port 8080 --update-interval 43200 --min-dpm 5.0
+```
+
+#### One-time Execution
+
+```bash
+# Create output directory
+mkdir -p ./output
+
+# Run one-time analysis
+docker run --rm \
+  -v $(pwd)/output:/app/output \
+  -e PROMETHEUS_ENDPOINT="${PROMETHEUS_ENDPOINT}" \
+  -e PROMETHEUS_USERNAME="${PROMETHEUS_USERNAME}" \
+  -e PROMETHEUS_API_KEY="${PROMETHEUS_API_KEY}" \
+  dpm-finder:latest --format csv --min-dpm 2.0 --threads 8
+
+# Results will be in ./output/metric_rates.csv
+```
+
+### Using Docker Compose
+
+The included `docker-compose.yml` provides easy orchestration for both exporter and one-time execution modes.
+
+#### Prerequisites
+
+1. Install Docker Compose (comes with Docker Desktop)
+2. Create a `.env` file with your Prometheus credentials
+
+#### Environment File Setup
+
+Create a `.env` file in the project directory:
+
+```bash
+# .env file
+PROMETHEUS_ENDPOINT=https://prometheus-prod-13-prod-us-east-0.grafana.net
+PROMETHEUS_USERNAME=1234567
+PROMETHEUS_API_KEY=glc_key-example-...
+```
+
+#### Basic Exporter Setup
+
+```bash
+# Start the exporter service
+docker-compose up -d
+
+# View logs
+docker-compose logs -f dpm-finder
+
+# View live logs with timestamps
+docker-compose logs -f --timestamps dpm-finder
+
+# Stop the service
+docker-compose down
+```
+
+#### Advanced Exporter Configuration
+
+Override default settings using command line:
+
+```bash
+# Custom configuration with environment override
+PROMETHEUS_ENDPOINT="https://custom-prometheus.example.com" \
+PROMETHEUS_USERNAME="custom-user" \
+PROMETHEUS_API_KEY="custom-key" \
+docker-compose up -d
+```
+
+Or modify the `docker-compose.yml` command section:
+
+```yaml
+services:
+  dpm-finder:
+    # ... other settings ...
+    command: ["--exporter", "--port", "9966", "--update-interval", "43200", "--min-dpm", "5.0", "--threads", "16"]
+```
+
+#### One-time Analysis
+
+```bash
+# Create output directory first
+mkdir -p ./output
+
+# Run one-time analysis using the oneshot profile
+docker-compose --profile oneshot up dpm-finder-oneshot
+
+# Results will be in ./output/ directory
+ls -la ./output/
+
+# Clean up after one-time run
+docker-compose --profile oneshot down
+```
+
+#### Multiple Configurations
+
+Run different configurations simultaneously:
+
+```bash
+# Run main exporter
+docker-compose up -d dpm-finder
+
+# Run high-threshold analysis in parallel
+docker run --rm \
+  --env-file .env \
+  -v $(pwd)/output:/app/output \
+  dpm-finder:latest --format json --min-dpm 10.0 --threads 4
+```
+
+#### Production Deployment
+
+For production use, consider this enhanced configuration:
+
+```yaml
+# docker-compose.prod.yml
+services:
+  dpm-finder:
+    build: .
+    image: dpm-finder:latest
+    container_name: dpm-finder-prod
+    restart: always
+    ports:
+      - "9966:9966"
+    environment:
+      - PROMETHEUS_ENDPOINT=${PROMETHEUS_ENDPOINT}
+      - PROMETHEUS_USERNAME=${PROMETHEUS_USERNAME}  
+      - PROMETHEUS_API_KEY=${PROMETHEUS_API_KEY}
+    command: ["--exporter", "--port", "9966", "--update-interval", "86400", "--quiet"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import requests; requests.get('http://localhost:9966/metrics', timeout=5)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: '0.5'
+```
+
+Deploy with:
+
+```bash
+docker-compose -f docker-compose.prod.yml up -d
+```
+
+#### Troubleshooting Docker Compose
+
+```bash
+# Check service status
+docker-compose ps
+
+# View detailed service information
+docker-compose config
+
+# Check container resource usage
+docker stats dpm-finder
+
+# Access container shell for debugging
+docker-compose exec dpm-finder /bin/bash
+
+# Rebuild and restart after code changes
+docker-compose down
+docker-compose build --no-cache
+docker-compose up -d
+
+# View container logs with specific time range
+docker-compose logs --since="1h" --until="30m" dpm-finder
+```
+
+#### Integration with Monitoring Stack
+
+Example integration with Prometheus monitoring:
+
+```yaml
+# docker-compose.monitoring.yml
+services:
+  dpm-finder:
+    build: .
+    container_name: dpm-finder
+    ports:
+      - "9966:9966"
+    environment:
+      - PROMETHEUS_ENDPOINT=${PROMETHEUS_ENDPOINT}
+      - PROMETHEUS_USERNAME=${PROMETHEUS_USERNAME}
+      - PROMETHEUS_API_KEY=${PROMETHEUS_API_KEY}
+    networks:
+      - monitoring
+
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml
+    networks:
+      - monitoring
+
+networks:
+  monitoring:
+    driver: bridge
+```
+
+### Docker Health Checks
+
+The container includes health checks that verify the `/metrics` endpoint:
+
+```bash
+# Check container health
+docker ps
+
+# View health check logs
+docker inspect dpm-finder --format='{{.State.Health.Status}}'
+```
+
+### Container Features
+
+- **Multi-stage build**: Minimized image size (~100MB)
+- **Non-root user**: Runs as `dpmfinder` user for security
+- **Health checks**: Built-in endpoint monitoring
+- **Signal handling**: Graceful shutdown on SIGTERM/SIGINT
+- **Optimized**: Python bytecode optimization enabled
+
 ## Prometheus Exporter Mode
 
 The script can run as a Prometheus exporter, serving metrics at an HTTP endpoint for Prometheus to scrape. In this mode:
