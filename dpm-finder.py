@@ -53,7 +53,7 @@ def update_prometheus_metrics(filtered_dpm, performance_data):
 
 def make_request_with_retry(url, auth, params=None, max_retries=10, retry_delay=2, quiet=False):
     """
-    Make HTTP request with retry logic for ConnectionResetError
+    Make HTTP request with retry logic for any error with exponential backoff
     Returns:
         On success: requests.Response object
         On failure: Exception object
@@ -68,18 +68,42 @@ def make_request_with_retry(url, auth, params=None, max_retries=10, retry_delay=
             )
             response.raise_for_status()
             return response
-        except ConnectionResetError as e:
+        except Exception as e:
             if attempt < max_retries - 1:  # Don't sleep on the last attempt
                 if not quiet:
-                    logger.warning(f"Connection reset, retrying in {retry_delay} seconds... (Attempt {attempt + 1}/{max_retries})")
+                    logger.warning(f"Request failed ({type(e).__name__}: {str(e)}), retrying in {retry_delay} seconds... (Attempt {attempt + 1}/{max_retries})")
                 time.sleep(retry_delay)
                 retry_delay *= 2  # Exponential backoff
             else:
+                if not quiet:
+                    logger.error(f"Request failed after {max_retries} attempts: {str(e)}")
                 return e  # Return the exception if we've exhausted all retries
-        except requests.exceptions.RequestException as e:
-            if not quiet:
-                logger.error(f"Error making request: {str(e)}") 
-            return e  # Return any other request exception
+
+def retry_with_backoff(operation, operation_name, max_retries=3, retry_delay=2, quiet=False):
+    """
+    Generic retry function with exponential backoff for any operation
+    Args:
+        operation: Function to execute (should return a value or raise an exception)
+        operation_name: String description of the operation for logging
+        max_retries: Maximum number of retry attempts
+        retry_delay: Initial delay between retries in seconds
+        quiet: If True, suppress retry logging
+    Returns:
+        Result of operation on success, None on failure
+    """
+    for attempt in range(max_retries):
+        try:
+            return operation()
+        except Exception as e:
+            if attempt < max_retries - 1:  # Don't sleep on the last attempt
+                if not quiet:
+                    logger.warning(f"{operation_name} failed ({type(e).__name__}: {str(e)}), retrying in {retry_delay} seconds... (Attempt {attempt + 1}/{max_retries})")
+                time.sleep(retry_delay)
+                retry_delay *= 2  # Exponential backoff
+            else:
+                if not quiet:
+                    logger.error(f"{operation_name} failed after {max_retries} attempts: {str(e)}")
+                return None
 
 def get_metric_json(url, username, api_key, quiet=False):
     """
@@ -359,7 +383,7 @@ def run_metrics_updater(metric_value_url, metric_name_url, metric_aggregation_ur
     logger.info(f"Starting metrics updater with {update_interval}s interval")
     
     while not shutdown_event.is_set():
-        try:
+        def collect_and_update_metrics():
             logger.debug("Fetching metrics for update...")
             
             # Get fresh metric data
@@ -368,7 +392,7 @@ def run_metrics_updater(metric_value_url, metric_name_url, metric_aggregation_ur
             
             if metric_names is not None:
                 # Calculate metrics in exporter mode
-                get_metric_rates(
+                success = get_metric_rates(
                     metric_value_url,
                     username,
                     api_key,
@@ -379,12 +403,21 @@ def run_metrics_updater(metric_value_url, metric_name_url, metric_aggregation_ur
                     thread_count=thread_count,
                     exporter_mode=True
                 )
-                logger.debug("Metrics updated successfully")
+                if success:
+                    logger.debug("Metrics updated successfully")
+                    return True
+                else:
+                    raise Exception("Failed to calculate metric rates")
             else:
-                logger.error("Failed to fetch metric names during update")
-            
-        except Exception as e:
-            logger.error(f"Error during metrics update: {e}")
+                raise Exception("Failed to fetch metric names")
+        
+        # Use retry logic with exponential backoff for metrics collection
+        retry_with_backoff(
+            collect_and_update_metrics,
+            "Periodic metrics collection",
+            max_retries=3,
+            quiet=True  # Keep background updates quiet unless they completely fail
+        )
         
         # Wait for next update or shutdown
         if shutdown_event.wait(timeout=update_interval):
@@ -414,7 +447,56 @@ def run_exporter(port, metric_value_url, metric_name_url, metric_aggregation_url
         'thread_count': str(thread_count)
     })
     
-    # Start metrics updater thread
+    # Start HTTP server immediately using prometheus_client
+    logger.info(f"Starting DPM finder exporter on port {port}")
+    logger.info(f"Metrics available at: http://localhost:{port}/metrics")
+    
+    try:
+        start_http_server(port)
+        logger.info("Exporter server started successfully")
+    except Exception as e:
+        logger.error(f"Error starting exporter server: {e}")
+        sys.exit(1)
+    
+    # Get initial metrics after server is running
+    logger.info("Performing initial metrics collection...")
+    
+    def initial_metrics_collection():
+        metric_names = get_metric_json(metric_name_url, username, api_key, quiet=quiet)
+        metric_aggregations = get_metric_json(metric_aggregation_url, username, api_key, quiet=quiet)
+        
+        if metric_names is not None:
+            success = get_metric_rates(
+                metric_value_url,
+                username,
+                api_key,
+                metric_names,
+                metric_aggregations,
+                min_dpm=min_dpm,
+                quiet=quiet,
+                thread_count=thread_count,
+                exporter_mode=True
+            )
+            if success:
+                logger.info("Initial metrics collection completed")
+                return True
+            else:
+                raise Exception("Failed to calculate initial metric rates")
+        else:
+            raise Exception("Failed to fetch metric names for initial collection")
+    
+    # Use retry logic with exponential backoff for initial collection
+    initial_success = retry_with_backoff(
+        initial_metrics_collection,
+        "Initial metrics collection",
+        max_retries=5,  # More retries for initial collection since it's critical
+        quiet=quiet
+    )
+    
+    if not initial_success and not quiet:
+        logger.warning("Initial metrics collection failed, continuing with empty metrics until next update cycle")
+    
+    # Start metrics updater thread for periodic updates
     updater_thread = threading.Thread(
         target=run_metrics_updater,
         args=(metric_value_url, metric_name_url, metric_aggregation_url, username, api_key,
@@ -423,21 +505,11 @@ def run_exporter(port, metric_value_url, metric_name_url, metric_aggregation_url
     )
     updater_thread.start()
     
-    # Start HTTP server using prometheus_client
-    logger.info(f"Starting DPM finder exporter on port {port}")
-    logger.info(f"Metrics available at: http://localhost:{port}/metrics")
-    
     try:
-        start_http_server(port)
-        logger.info("Exporter server started successfully")
-        
         # Keep the main thread alive
         while not shutdown_event.is_set():
             time.sleep(1)
             
-    except Exception as e:
-        logger.error(f"Error starting exporter server: {e}")
-        sys.exit(1)
     except KeyboardInterrupt:
         logger.info("Shutting down server...")
     finally:
