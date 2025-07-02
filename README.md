@@ -381,7 +381,9 @@ All log messages include timestamps and severity levels for better monitoring an
 
 ## Usage
 
+
 usage: dpm-finder.py [-h] [-f {csv,text,txt,json,prom}] [-m MIN_DPM] [-q] [-v] [-t THREADS] [-e] [-p PORT] [-u UPDATE_INTERVAL]
+
 
         DPM Finder - A tool to calculate Data Points per Minute (DPM) for Prometheus metrics.
         This script connects to a Prometheus instance, retrieves all metric names,
@@ -400,6 +402,7 @@ optional arguments:
   -v, --verbose         Enable debug logging for detailed output
   -t THREADS, --threads THREADS
                         Number of concurrent threads for processing metrics (minimum: 1, default: 10)
+
   -e, --exporter        Run as a Prometheus exporter server instead of one-time execution
   -p PORT, --port PORT   Port to run the exporter server on (default: 9966)
   -u UPDATE_INTERVAL, --update-interval UPDATE_INTERVAL
@@ -449,6 +452,7 @@ The script requires these Python packages (installed via requirements.txt):
 ./dpm-finder.py -e -p 9090 
 
 ```
+
 
 ## Notes
 
