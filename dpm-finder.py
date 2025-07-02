@@ -458,6 +458,8 @@ def main():
         This script connects to a Prometheus instance, retrieves all metric names,
         calculates their DPM, and outputs the results either in CSV or text format.
         Results are filtered to show only metrics above a specified DPM threshold.
+        
+        This script is not intended to be run frequently.
         """,
         formatter_class=argparse.RawDescriptionHelpFormatter,
         add_help=False  # Disable default help to add our own
@@ -500,18 +502,18 @@ def main():
         help='Number of concurrent threads for processing metrics (minimum: 1, default: 10)'
     )
     parser.add_argument(
-        '--exporter',
+        '-e', '--exporter',
         action='store_true',
         help='Run as a Prometheus exporter server instead of one-time execution'
     )
     parser.add_argument(
-        '--port',
+        '-p', '--port',
         type=int,
-        default=8000,
-        help='Port to run the exporter server on (default: 8000)'
+        default=9966,
+        help='Port to run the exporter server on (default: 9966)'
     )
     parser.add_argument(
-        '--update-interval',
+        '-u', '--update-interval',
         type=int,
         default=86400,
         help='How often to update metrics in exporter mode, in seconds (default: 86400 or 1 day)'

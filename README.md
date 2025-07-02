@@ -59,7 +59,7 @@ python3 -m pip install -r requirements.txt
 
 **Prometheus exporter mode:**
 ``` bash
-./dpm-finder.py --exporter --port 8000 --update-interval 3600
+./dpm-finder.py -e -p 9966
 ```
 
 ## Prometheus Exporter Mode
@@ -91,7 +91,7 @@ Add this to your `prometheus.yml`:
 scrape_configs:
   - job_name: 'dpm-finder'
     static_configs:
-      - targets: ['localhost:8000']
+      - targets: ['localhost:9966']
     scrape_interval: 1h  # Match or exceed your update interval
 ```
 
@@ -107,13 +107,14 @@ All log messages include timestamps and severity levels for better monitoring an
 
 ## Usage
 
-usage: dpm-finder.py [-h] [-f {csv,text,txt,json,prom}] [-m MIN_DPM] [-q] [-v] [-t THREADS] [--exporter] [--port PORT] [--update-interval UPDATE_INTERVAL]
+usage: dpm-finder.py [-h] [-f {csv,text,txt,json,prom}] [-m MIN_DPM] [-q] [-v] [-t THREADS] [-e] [-p PORT] [-u UPDATE_INTERVAL]
 
         DPM Finder - A tool to calculate Data Points per Minute (DPM) for Prometheus metrics.
         This script connects to a Prometheus instance, retrieves all metric names,
         calculates their DPM, and outputs the results either in CSV or text format.
         Results are filtered to show only metrics above a specified DPM threshold.
         
+        This script is not intended to be run frequently.
 
 optional arguments:
   -h, --help            Show this help message and exit
@@ -125,10 +126,10 @@ optional arguments:
   -v, --verbose         Enable debug logging for detailed output
   -t THREADS, --threads THREADS
                         Number of concurrent threads for processing metrics (minimum: 1, default: 10)
-  --exporter            Run as a Prometheus exporter server instead of one-time execution
-  --port PORT           Port to run the exporter server on (default: 8000)
-  --update-interval UPDATE_INTERVAL
-                        How often to update metrics in exporter mode, in seconds (default: 86400 or 1 day)
+  -e, --exporter        Run as a Prometheus exporter server instead of one-time execution
+  -p PORT, --port PORT   Port to run the exporter server on (default: 9966)
+  -u UPDATE_INTERVAL, --update-interval UPDATE_INTERVAL
+                         How often to update metrics in exporter mode, in seconds (default: 1 day or 86400 seconds)
 
 ## Filtered Metrics
 
@@ -155,11 +156,11 @@ The script requires these Python packages (installed via requirements.txt):
 # Basic CSV output
 ./dpm-finder.py
 
-# JSON output with higher threshold and more threads
+# JSON output with high threshold and more threads
 ./dpm-finder.py -f json -m 10.0 -t 16
 
 # Quiet mode for scripting
-./dpm-finder.py -q -f csv -m 5.0
+./dpm-finder.py -q -f csv -m 2.0
 
 # Verbose debugging
 ./dpm-finder.py -v -t 8
@@ -167,14 +168,12 @@ The script requires these Python packages (installed via requirements.txt):
 
 ### Exporter Mode
 ```bash
-# Basic exporter on port 8000, daily updates
-./dpm-finder.py --exporter
+# Basic exporter on port 9966, daily updates
+./dpm-finder.py -e
 
-# Custom port and hourly updates
-./dpm-finder.py --exporter --port 9090 --update-interval 3600
+# Custom port 
+./dpm-finder.py -e -p 9090 
 
-# High-threshold monitoring with frequent updates
-./dpm-finder.py --exporter --min-dpm 50.0 --update-interval 1800 --port 8080
 ```
 
 ## Notes
@@ -183,7 +182,7 @@ The script requires these Python packages (installed via requirements.txt):
 - **Debugging**: Use `-v` for verbose debugging when troubleshooting connection or processing issues
 - **Automation**: Use `-q` for silent operation when running in automated scripts or CI/CD pipelines
 - **File output**: Format "prom" will output Prometheus exposition style metrics that could be forwarded using Alloy's prometheus.exporter.unix "textfile" collector
-- **Update intervals**: In exporter mode, daily updates (86400s) are recommended to balance resource usage with monitoring needs
+- **Update intervals**: In exporter mode, daily updates (1 day) are recommended to balance resource usage with monitoring needs
 
 ## Error Handling
 
