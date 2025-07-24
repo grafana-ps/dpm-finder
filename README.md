@@ -22,9 +22,14 @@ The script does the following:
     - Metrics beginning with `grafana_` (Grafana internal metrics)
     - Metrics with aggregation rules defined in the cluster
 3.  **Calculates DPM rate** for each metric using a PromQL query: `count_over_time({metric_name}[5m])/5`.
-4.  **Filters results** based on a DPM threshold (metrics with DPM > 1 by default).
+4.  **Filters results** based on:
+    - DPM threshold (metrics with DPM > 1 by default)
+    - Label patterns (e.g., `job=myapp` or `env=~prod.*`)
+    - Top N metrics by DPM value
 5.  **Outputs results** in various formats:
     - **One-time mode**: CSV, JSON, text, or Prometheus exposition format files
+      - With `--show-labels`: Includes label information for each metric
+      - Sorted by DPM (default) or metric name
     - **Exporter mode**: Live Prometheus metrics endpoint at `/metrics`
 6.  **Provides detailed logging** with configurable verbosity levels for monitoring progress and debugging.
 
@@ -382,7 +387,9 @@ All log messages include timestamps and severity levels for better monitoring an
 ## Usage
 
 
-usage: dpm-finder.py [-h] [-f {csv,text,txt,json,prom}] [-m MIN_DPM] [-q] [-v] [-t THREADS] [-e] [-p PORT] [-u UPDATE_INTERVAL]
+usage: dpm-finder.py [-h] [-f {csv,text,txt,json,prom}] [-m MIN_DPM] [-q] [-v] [-t THREADS] 
+                     [-l] [-n TOP_N] [-s {dpm,name}] [--filter-labels FILTER_LABELS]
+                     [-e] [-p PORT] [-u UPDATE_INTERVAL]
 
 
         DPM Finder - A tool to calculate Data Points per Minute (DPM) for Prometheus metrics.
@@ -402,6 +409,14 @@ optional arguments:
   -v, --verbose         Enable debug logging for detailed output
   -t THREADS, --threads THREADS
                         Number of concurrent threads for processing metrics (minimum: 1, default: 10)
+
+  -l, --show-labels     Display labels associated with each metric (requires additional queries)
+  -n TOP_N, --top-n TOP_N
+                        Limit output to top N metrics by DPM value
+  -s {dpm,name}, --sort-by {dpm,name}
+                        Sort output by dpm (default) or name
+  --filter-labels FILTER_LABELS
+                        Filter metrics by label patterns (e.g., "job=myapp" or "env=~prod.*")
 
   -e, --exporter        Run as a Prometheus exporter server instead of one-time execution
   -p PORT, --port PORT   Port to run the exporter server on (default: 9966)
@@ -436,6 +451,15 @@ The script requires these Python packages (installed via requirements.txt):
 # JSON output with high threshold and more threads
 ./dpm-finder.py -f json -m 10.0 -t 16
 
+# Top 10 metrics with labels
+./dpm-finder.py --show-labels --top-n 10
+
+# Filter by job and environment
+./dpm-finder.py --filter-labels "job=myapp,env=production" -f json
+
+# Sort by metric name with minimum 5 DPM
+./dpm-finder.py --min-dpm 5 --sort-by name -f csv
+
 # Quiet mode for scripting
 ./dpm-finder.py -q -f csv -m 2.0
 
@@ -448,9 +472,8 @@ The script requires these Python packages (installed via requirements.txt):
 # Basic exporter on port 9966, daily updates
 ./dpm-finder.py -e
 
-# Custom port 
-./dpm-finder.py -e -p 9090 
-
+# Custom port with filtering
+./dpm-finder.py -e -p 9090 --min-dpm 5.0 --filter-labels "env=production"
 ```
 
 
@@ -461,6 +484,8 @@ The script requires these Python packages (installed via requirements.txt):
 - **Automation**: Use `-q` for silent operation when running in automated scripts or CI/CD pipelines
 - **File output**: Format "prom" will output Prometheus exposition style metrics that could be forwarded using Alloy's prometheus.exporter.unix "textfile" collector
 - **Update intervals**: In exporter mode, daily updates (1 day) are recommended to balance resource usage with monitoring needs
+- **Label queries**: Using `--show-labels` requires additional queries which may increase execution time
+- **Filter efficiency**: Label filters are applied at query time for better performance
 
 ## Error Handling
 
