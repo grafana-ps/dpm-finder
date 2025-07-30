@@ -184,3 +184,7 @@ metric_rates.prom
 metric_rates.json
 
 
+
+cardinality_analysis.html
+
+cardinality_analysis.csv
