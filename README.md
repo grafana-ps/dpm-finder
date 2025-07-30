@@ -584,6 +584,10 @@ Comparison options:
 --compare             Enable comparison mode to analyze changes between two time windows
 --compare-window      Time window for comparison (required if --compare is used)
 --compare-start-time  Start time for comparison window (same format as --start-time)
+
+AI Analysis (NEW):
+--ai-analysis         Generate AI-powered analysis and recommendations using OpenAI
+                      (requires OPENAI_KEY env var and additional dependencies)
 ```
 
 ## Timezone Handling
@@ -632,6 +636,74 @@ Comparison options:
 ```bash
 ./cardinality-analyzer.py -w 30m --top-n 50 -o csv
 ```
+
+## AI-Powered Analysis (NEW)
+
+The cardinality analyzer now includes optional AI-powered analysis using OpenAI's GPT models to provide insights and recommendations.
+
+### Setting up AI Analysis
+
+1. **Install additional dependencies**:
+   ```bash
+   pip install -r requirements-cardinalityanalysis.txt
+   ```
+   This installs the OpenAI SDK along with the standard dependencies.
+
+2. **Configure OpenAI credentials**:
+   Add these to your `.env` file:
+   ```bash
+   OPENAI_KEY="sk-..."  # Your OpenAI API key
+   OPENAI_MODEL="gpt-4o"  # Optional: defaults to gpt-4o, can use gpt-4-turbo, gpt-3.5-turbo, etc.
+   ```
+
+3. **Enable AI analysis**:
+   Add the `--ai-analysis` flag to any command:
+   ```bash
+   # Basic analysis with AI insights
+   ./cardinality-analyzer.py -w 1h --ai-analysis
+   
+   # Comparison with AI recommendations
+   ./cardinality-analyzer.py -w 1h --compare --compare-window 1h --compare-start-time 2024-01-14T10:00:00 --ai-analysis
+   ```
+
+### What the AI Analyzes
+
+The AI provides:
+- **Key Findings**: Detailed observations about cardinality patterns and changes
+- **Detailed Analysis**: Comprehensive metric-by-metric and label-by-label breakdown
+- **Changes Between Windows**: When comparing time periods, specific differences with numbers
+- **Pattern Recognition**: Identifies which labels have highest cardinality and their distributions
+- **Data Explanation**: Clear descriptions of what the metrics show, not recommendations
+
+### AI Analysis Features
+
+- **Detailed Breakdowns**: Provides comprehensive explanations of cardinality distribution
+- **Change Analysis**: When comparing time windows, explains exactly what changed with numbers
+- **Pattern Recognition**: Identifies which labels contribute most to cardinality
+- **Data-Focused**: Concentrates on explaining the data rather than providing solutions
+- **Markdown Formatting**: Results are properly formatted with headers, bold text, and bullet points
+
+### Example AI Output
+
+The AI analysis appears in:
+- **HTML reports**: As a dedicated section with formatted recommendations
+- **CLI output**: After the standard analysis tables
+- **All formats**: When using `-o all`, AI insights are included in each format
+
+### Cost Considerations
+
+- Each analysis uses OpenAI API tokens (typically 2000-4000 tokens per analysis)
+- Larger datasets and comparison analyses use more tokens
+- Monitor your OpenAI usage to manage costs
+- Use `OPENAI_MODEL="gpt-3.5-turbo"` for lower-cost analysis
+
+### Troubleshooting AI Analysis
+
+If AI analysis fails:
+1. Check that `OPENAI_KEY` is set correctly in `.env`
+2. Verify the API key has sufficient credits
+3. Ensure you've installed the extra dependencies: `pip install -r requirements-cardinalityanalysis.txt`
+4. Check logs for specific error messages
 
 ## Understanding the Results
 

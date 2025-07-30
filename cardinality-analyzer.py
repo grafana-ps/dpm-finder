@@ -231,7 +231,9 @@ class CardinalityAnalyzer:
         return comparison
 
 def generate_html_output(analyses: List[Dict], comparisons: Optional[List[Dict]] = None, 
-                        window: str = "", start_time: str = "") -> str:
+                        window: str = "", start_time: str = "", ai_analysis: Optional[str] = None,
+                        compare_window: str = "", compare_start_time: str = "", 
+                        command_line: str = "") -> str:
     """Generate interactive HTML report"""
     
     # Prepare data for JavaScript
@@ -242,6 +244,30 @@ def generate_html_output(analyses: List[Dict], comparisons: Optional[List[Dict]]
     comparison_tab = '<div class="tab" onclick="switchTab(\'comparison\')">Comparison</div>' if comparisons else ''
     start_time_str = f"(starting {start_time})" if start_time else ""
     timestamp = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')
+    
+    # Build analysis details
+    analysis_details = []
+    # Always show the starting time for consistency
+    analysis_details.append(f'<strong>Analysis Window:</strong> {window} (starting {start_time})')
+    if comparisons and compare_window:
+        analysis_details.append(f'<strong>Comparison Window:</strong> {compare_window} (starting {compare_start_time})')
+    analysis_details.append(f'<strong>Generated:</strong> {timestamp}')
+    if command_line:
+        # Escape the command line for HTML
+        import html
+        escaped_command = html.escape(command_line)
+        analysis_details.append(f'<strong>Command Used:</strong> <code style="background: #f5f5f5; padding: 4px 8px; border-radius: 4px; font-family: monospace;">{escaped_command}</code>')
+    
+    analysis_details_html = '<br>'.join(analysis_details)
+    
+    # Prepare AI analysis section if available
+    ai_section = ""
+    if ai_analysis:
+        try:
+            from cardinality_analyzer_ai_analysis import generate_ai_report_section
+            ai_section = generate_ai_report_section(ai_analysis)
+        except ImportError:
+            ai_section = f'<div class="info-box" style="background: #ffebee; border-color: #f44336;">AI analysis was requested but module not available. Install with: pip install -r requirements-cardinalityanalysis.txt</div>'
     
     # Use string replacement instead of format to avoid conflicts with JavaScript template literals
     html_template = """<!DOCTYPE html>
@@ -383,8 +409,9 @@ def generate_html_output(analyses: List[Dict], comparisons: Optional[List[Dict]]
 <body>
     <div class="container">
         <h1>Metric Cardinality Analysis Report</h1>
-        <p><strong>Analysis Window:</strong> {window} {start_time_str}</p>
-        <p><strong>Generated:</strong> {timestamp}</p>
+        <div style="margin: 20px 0; line-height: 1.8;">
+            {analysis_details_html}
+        </div>
         
         <div class="info-box">
             <h3>How to Use This Report</h3>
@@ -397,6 +424,8 @@ def generate_html_output(analyses: List[Dict], comparisons: Optional[List[Dict]]
                 <li>In comparison mode, positive changes (red) indicate increased cardinality</li>
             </ul>
         </div>
+        
+        {ai_section}
         
         <div class="tabs">
             <div class="tab active" onclick="switchTab('analysis')">Cardinality Analysis</div>
@@ -685,12 +714,11 @@ def generate_html_output(analyses: List[Dict], comparisons: Optional[List[Dict]]
 """
     
     # Replace placeholders without using format() to avoid conflicts with JavaScript ${} syntax
-    html_output = html_template.replace('{window}', window)
-    html_output = html_output.replace('{start_time_str}', start_time_str)
-    html_output = html_output.replace('{timestamp}', timestamp)
+    html_output = html_template.replace('{analysis_details_html}', analysis_details_html)
     html_output = html_output.replace('{analyses_json}', analyses_json)
     html_output = html_output.replace('{comparisons_json}', comparisons_json)
     html_output = html_output.replace('{comparison_tab}', comparison_tab)
+    html_output = html_output.replace('{ai_section}', ai_section)
     
     return html_output
 
@@ -797,7 +825,16 @@ def main():
     parser.add_argument('--compare-start-time',
                        help='Start time for comparison window (same format as --start-time)')
     
+    # AI analysis option
+    parser.add_argument('--ai-analysis', action='store_true',
+                       help='Generate AI-powered analysis and recommendations using OpenAI (requires OPENAI_KEY env var)')
+    
     args = parser.parse_args()
+    
+    # Build command line string for reproducibility
+    command_parts = [sys.argv[0]]
+    command_parts.extend(sys.argv[1:])
+    command_line = ' '.join(command_parts)
     
     # Validate environment variables
     endpoint = os.getenv('PROMETHEUS_ENDPOINT')
@@ -820,7 +857,9 @@ def main():
     try:
         # Parse time windows
         start_ts, end_ts = analyzer.parse_time_window(args.window, args.start_time)
-        logger.info(f"Analyzing window: {datetime.fromtimestamp(start_ts, tz=timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')} to {datetime.fromtimestamp(end_ts, tz=timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}")
+        # Format the actual start time for display
+        actual_start_time = datetime.fromtimestamp(start_ts, tz=timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')
+        logger.info(f"Analyzing window: {actual_start_time} to {datetime.fromtimestamp(end_ts, tz=timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}")
         
         # Determine which metrics to analyze
         if args.metric:
@@ -853,9 +892,11 @@ def main():
         
         # Handle comparison if requested
         comparisons = None
+        actual_compare_start_time = None
         if args.compare:
             comp_start, comp_end = analyzer.parse_time_window(args.compare_window, args.compare_start_time)
-            logger.info(f"Comparing with window: {datetime.fromtimestamp(comp_start, tz=timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')} to {datetime.fromtimestamp(comp_end, tz=timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}")
+            actual_compare_start_time = datetime.fromtimestamp(comp_start, tz=timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')
+            logger.info(f"Comparing with window: {actual_compare_start_time} to {datetime.fromtimestamp(comp_end, tz=timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}")
             
             comparisons = []
             for metric in metrics_to_analyze:
@@ -875,9 +916,27 @@ def main():
                 except Exception as e:
                     logger.warning(f"Failed to compare {metric}: {e}")
         
+        # Generate AI analysis if requested
+        ai_analysis_text = None
+        if args.ai_analysis:
+            logger.info("Generating AI analysis...")
+            try:
+                from cardinality_analyzer_ai_analysis import get_ai_analysis
+                ai_analysis_text = get_ai_analysis(analyses, comparisons, args.window, args.start_time)
+                logger.info("AI analysis completed successfully")
+            except ImportError:
+                logger.error("AI analysis module not available. Install with: pip install -r requirements-cardinalityanalysis.txt")
+            except Exception as e:
+                logger.error(f"Failed to generate AI analysis: {e}")
+        
         # Generate outputs
         if args.output in ['cli', 'all']:
             generate_cli_output(analyses, comparisons)
+            if ai_analysis_text and args.ai_analysis:
+                print("\n" + "="*80)
+                print("AI ANALYSIS AND RECOMMENDATIONS")
+                print("="*80)
+                print(ai_analysis_text)
         
         if args.output in ['csv', 'all']:
             csv_file = generate_csv_output(analyses)
@@ -887,7 +946,11 @@ def main():
             html_content = generate_html_output(
                 analyses, comparisons,
                 args.window,
-                args.start_time or ""
+                actual_start_time,  # Always show the calculated start time
+                ai_analysis_text,
+                args.compare_window if args.compare else "",
+                actual_compare_start_time if args.compare else "",  # Show calculated compare start time
+                command_line
             )
             html_file = "cardinality_analysis.html"
             with open(html_file, 'w') as f:
