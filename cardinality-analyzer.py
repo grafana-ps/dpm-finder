@@ -20,8 +20,7 @@ from urllib.parse import urljoin
 from requests.auth import HTTPBasicAuth
 from dotenv import load_dotenv
 
-# Set up logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+# Set up logging (will be configured in main())
 logger = logging.getLogger(__name__)
 
 # Load environment variables
@@ -83,6 +82,9 @@ class CardinalityAnalyzer:
         }
         
         try:
+            logger.debug(f"Executing query: {query}")
+            logger.debug(f"Time range: {datetime.fromtimestamp(start, tz=timezone.utc)} to {datetime.fromtimestamp(end, tz=timezone.utc)}")
+            
             response = self.session.get(url, params=params, timeout=300)
             response.raise_for_status()
             data = response.json()
@@ -90,13 +92,17 @@ class CardinalityAnalyzer:
             if data.get('status') != 'success':
                 raise Exception(f"Query failed: {data.get('error', 'Unknown error')}")
             
+            # Log if no results returned
+            if not data['data'].get('result'):
+                logger.warning(f"Query returned no results: {query}")
+            
             return data['data']
         except requests.exceptions.RequestException as e:
             logger.error(f"Error querying Prometheus: {e}")
             raise
     
-    def get_top_metrics(self, start: int, end: int, top_n: int = 20) -> List[str]:
-        """Get top N metrics by cardinality"""
+    def get_top_metrics(self, start: int, end: int, top_n: int = 20) -> List[Tuple[str, float]]:
+        """Get top N metrics by cardinality with their cardinality values"""
         query = f'topk({top_n}, count by (__name__)({{__name__=~".+"}}))' 
         
         logger.info(f"Fetching top {top_n} metrics by cardinality...")
@@ -105,8 +111,10 @@ class CardinalityAnalyzer:
         metrics = []
         for result in data.get('result', []):
             metric_name = result['metric'].get('__name__', '')
-            if metric_name:
-                metrics.append(metric_name)
+            if metric_name and result.get('values'):
+                # Get the cardinality value from the last data point
+                cardinality = float(result['values'][-1][1])
+                metrics.append((metric_name, cardinality))
         
         return metrics
     
@@ -251,6 +259,10 @@ def generate_html_output(analyses: List[Dict], comparisons: Optional[List[Dict]]
     analysis_details.append(f'<strong>Analysis Window:</strong> {window} (starting {start_time})')
     if comparisons and compare_window:
         analysis_details.append(f'<strong>Comparison Window:</strong> {compare_window} (starting {compare_start_time})')
+    
+    # Create display strings for comparison clarity
+    analysis_window_display = f'{window} (starting {start_time})'
+    compare_window_display = f'{compare_window} (starting {compare_start_time})' if compare_window else ''
     analysis_details.append(f'<strong>Generated:</strong> {timestamp}')
     if command_line:
         # Escape the command line for HTML
@@ -418,6 +430,7 @@ def generate_html_output(analyses: List[Dict], comparisons: Optional[List[Dict]]
             <ul>
                 <li><strong>Cardinality</strong> refers to the number of unique time series for a metric</li>
                 <li><strong>High cardinality labels</strong> are those with many unique values, which can cause metric spikes</li>
+                <li><strong>Metrics are sorted</strong> from highest to lowest cardinality (using Prometheus topk function)</li>
                 <li>Click on table headers to sort by that column</li>
                 <li>Use the filter box to search for specific metrics or labels</li>
                 <li>Charts show the top contributors to cardinality for each metric</li>
@@ -465,7 +478,14 @@ def generate_html_output(analyses: List[Dict], comparisons: Optional[List[Dict]]
         
         function renderAnalysis() {
             const container = document.getElementById('analysis-content');
+            console.log('renderAnalysis called, container:', container);
             let html = '';
+            
+            // Add note about metric count and sorting
+            html += '<div style="margin-bottom: 20px; padding: 10px; background: #e3f2fd; border-radius: 4px;">';
+            html += '<strong>Showing ' + analysisData.length + ' metrics</strong> sorted by highest to lowest cardinality';
+            html += '</div>';
+            console.log('Generated sorting note HTML');
             
             analysisData.forEach((analysis, idx) => {
                 const metricName = analysis.metric;
@@ -506,9 +526,12 @@ def generate_html_output(analyses: List[Dict], comparisons: Optional[List[Dict]]
                             <tbody>
                 `;
                 
-                Object.entries(data).forEach(([label, info]) => {
-                    if (label === '__total__') return;
-                    
+                // Sort labels by cardinality (highest to lowest)
+                const sortedLabels = Object.entries(data)
+                    .filter(([label, info]) => label !== '__total__')
+                    .sort((a, b) => (b[1].total_cardinality || 0) - (a[1].total_cardinality || 0));
+                
+                sortedLabels.forEach(([label, info]) => {
                     const topValues = info.top_values || [];
                     const topValuesStr = topValues.slice(0, 5)
                         .map(([val, count]) => `${val} (${count})`)
@@ -602,6 +625,15 @@ def generate_html_output(analyses: List[Dict], comparisons: Optional[List[Dict]]
             }
             
             let html = '<h2>Cardinality Changes Between Time Windows</h2>';
+            html += '<div style="margin: 10px 0; padding: 10px; background: #f5f5f5; border-radius: 4px;">';
+            html += '<strong>Before:</strong> {compare_window_display}<br>';
+            html += '<strong>After:</strong> {analysis_window_display}';
+            html += '</div>';
+            
+            // Add note about metric count and sorting
+            html += '<div style="margin-bottom: 20px; padding: 10px; background: #e3f2fd; border-radius: 4px;">';
+            html += '<strong>Showing ' + comparisonData.length + ' metrics</strong> sorted by highest to lowest cardinality';
+            html += '</div>';
             
             comparisonData.forEach(comp => {
                 html += `
@@ -620,7 +652,10 @@ def generate_html_output(analyses: List[Dict], comparisons: Optional[List[Dict]]
                             <tbody>
                 `;
                 
-                comp.sorted_changes.forEach(([label, change]) => {
+                // Sort by 'after' cardinality (highest to lowest)
+                const sortedByAfter = comp.sorted_changes.sort((a, b) => b[1].after - a[1].after);
+                
+                sortedByAfter.forEach(([label, change]) => {
                     const changeClass = change.change > 0 ? 'positive-change' : 
                                       change.change < 0 ? 'negative-change' : '';
                     
@@ -706,6 +741,7 @@ def generate_html_output(analyses: List[Dict], comparisons: Optional[List[Dict]]
         }
         
         // Initialize
+        console.log('Initializing with', analysisData.length, 'analyses and', comparisonData.length, 'comparisons');
         renderAnalysis();
         renderComparison();
     </script>
@@ -719,6 +755,8 @@ def generate_html_output(analyses: List[Dict], comparisons: Optional[List[Dict]]
     html_output = html_output.replace('{comparisons_json}', comparisons_json)
     html_output = html_output.replace('{comparison_tab}', comparison_tab)
     html_output = html_output.replace('{ai_section}', ai_section)
+    html_output = html_output.replace('{analysis_window_display}', analysis_window_display)
+    html_output = html_output.replace('{compare_window_display}', compare_window_display)
     
     return html_output
 
@@ -816,6 +854,8 @@ def main():
     parser.add_argument('-o', '--output', default='html',
                        choices=['cli', 'csv', 'html', 'all'],
                        help='Output format (default: html)')
+    parser.add_argument('-v', '--verbose', action='store_true',
+                       help='Enable verbose logging')
     
     # Comparison options
     parser.add_argument('--compare', action='store_true',
@@ -830,6 +870,10 @@ def main():
                        help='Generate AI-powered analysis and recommendations using OpenAI (requires OPENAI_KEY env var)')
     
     args = parser.parse_args()
+    
+    # Configure logging based on verbose flag
+    log_level = logging.DEBUG if args.verbose else logging.INFO
+    logging.basicConfig(level=log_level, format='%(asctime)s - %(levelname)s - %(message)s')
     
     # Build command line string for reproducibility
     command_parts = [sys.argv[0]]
@@ -866,11 +910,15 @@ def main():
             metrics_to_analyze = [args.metric]
         else:
             # Get top metrics by cardinality
-            metrics_to_analyze = analyzer.get_top_metrics(start_ts, end_ts, args.top_n)
-            if not metrics_to_analyze:
+            top_metrics = analyzer.get_top_metrics(start_ts, end_ts, args.top_n)
+            if not top_metrics:
                 logger.error("No metrics found to analyze")
                 sys.exit(1)
-            logger.info(f"Analyzing top {len(metrics_to_analyze)} metrics")
+            metrics_to_analyze = [metric for metric, cardinality in top_metrics]
+            if len(metrics_to_analyze) < args.top_n:
+                logger.info(f"Found {len(metrics_to_analyze)} total metrics (requested top {args.top_n})")
+            else:
+                logger.info(f"Analyzing top {len(metrics_to_analyze)} metrics by cardinality")
         
         # Analyze each metric
         analyses = []
@@ -904,13 +952,17 @@ def main():
                     logger.info(f"Analyzing comparison window for metric: {metric}")
                     comp_data = analyzer.analyze_metric_cardinality(metric, comp_start, comp_end)
                     
+                    # Log if no data found
+                    if not comp_data or all(not v for k, v in comp_data.items() if k != '__total__'):
+                        logger.warning(f"No cardinality data found for {metric} in comparison window")
+                    
                     # Find the original analysis
                     orig_analysis = next((a for a in analyses if a['metric'] == metric), None)
                     if orig_analysis:
                         comparison = analyzer.compare_time_windows(
                             metric,
-                            orig_analysis['data'],
-                            comp_data
+                            comp_data,  # comparison window as "before"
+                            orig_analysis['data']  # analysis window as "after"
                         )
                         comparisons.append(comparison)
                 except Exception as e:
