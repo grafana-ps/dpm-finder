@@ -116,6 +116,9 @@ class CardinalityAnalyzer:
                 cardinality = float(result['values'][-1][1])
                 metrics.append((metric_name, cardinality))
         
+        # Sort by cardinality (highest to lowest) to ensure proper ordering
+        metrics.sort(key=lambda x: x[1], reverse=True)
+        
         return metrics
     
     def analyze_metric_cardinality(self, metric_name: str, start: int, end: int) -> Dict[str, Dict[str, Any]]:
@@ -526,12 +529,17 @@ def generate_html_output(analyses: List[Dict], comparisons: Optional[List[Dict]]
                             <tbody>
                 `;
                 
-                // Sort labels by cardinality (highest to lowest)
-                const sortedLabels = Object.entries(data)
+                // Get all labels except __total__ and sort by cardinality
+                const labelsArray = Object.entries(data)
                     .filter(([label, info]) => label !== '__total__')
-                    .sort((a, b) => (b[1].total_cardinality || 0) - (a[1].total_cardinality || 0));
+                    .sort((a, b) => {
+                        const cardA = a[1].total_cardinality || 0;
+                        const cardB = b[1].total_cardinality || 0;
+                        return cardB - cardA; // Sort highest to lowest
+                    });
                 
-                sortedLabels.forEach(([label, info]) => {
+                // Render the sorted labels
+                labelsArray.forEach(([label, info]) => {
                     const topValues = info.top_values || [];
                     const topValuesStr = topValues.slice(0, 5)
                         .map(([val, count]) => `${val} (${count})`)
@@ -652,10 +660,14 @@ def generate_html_output(analyses: List[Dict], comparisons: Optional[List[Dict]]
                             <tbody>
                 `;
                 
-                // Sort by 'after' cardinality (highest to lowest)
-                const sortedByAfter = comp.sorted_changes.sort((a, b) => b[1].after - a[1].after);
+                // Sort changes by 'after' cardinality (highest to lowest)
+                const changesArray = [...comp.sorted_changes].sort((a, b) => {
+                    const afterA = a[1].after || 0;
+                    const afterB = b[1].after || 0;
+                    return afterB - afterA;
+                });
                 
-                sortedByAfter.forEach(([label, change]) => {
+                changesArray.forEach(([label, change]) => {
                     const changeClass = change.change > 0 ? 'positive-change' : 
                                       change.change < 0 ? 'negative-change' : '';
                     
@@ -914,11 +926,12 @@ def main():
             if not top_metrics:
                 logger.error("No metrics found to analyze")
                 sys.exit(1)
+            # Log the metrics and their cardinality values
+            logger.info(f"Top {len(top_metrics)} metrics by cardinality:")
+            for metric, cardinality in top_metrics[:args.top_n]:
+                logger.info(f"  {metric}: {cardinality:.0f}")
+            
             metrics_to_analyze = [metric for metric, cardinality in top_metrics]
-            if len(metrics_to_analyze) < args.top_n:
-                logger.info(f"Found {len(metrics_to_analyze)} total metrics (requested top {args.top_n})")
-            else:
-                logger.info(f"Analyzing top {len(metrics_to_analyze)} metrics by cardinality")
         
         # Analyze each metric
         analyses = []
