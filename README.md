@@ -653,7 +653,7 @@ The cardinality analyzer now includes optional AI-powered analysis using OpenAI'
    Add these to your `.env` file:
    ```bash
    OPENAI_KEY="sk-..."  # Your OpenAI API key
-   OPENAI_MODEL="gpt-4o"  # Optional: defaults to gpt-4o, can use gpt-4-turbo, gpt-3.5-turbo, etc.
+   OPENAI_MODEL="gpt-4.1"  # Optional: defaults to gpt-4.1 for good balance between price and performance
    ```
 
 3. **Enable AI analysis**:
