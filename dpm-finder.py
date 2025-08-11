@@ -52,7 +52,7 @@ def update_prometheus_metrics(filtered_dpm, performance_data):
     processing_rate_metric.set(performance_data['processing_rate'])
     last_update_metric.set(performance_data['last_update'])
 
-def make_request_with_retry(url, auth, params=None, max_retries=10, retry_delay=2, quiet=False):
+def make_request_with_retry(url, auth, params=None, max_retries=2, retry_delay=2, quiet=False):
     """
     Make HTTP request with retry logic for any error with exponential backoff
     Returns:
@@ -69,18 +69,38 @@ def make_request_with_retry(url, auth, params=None, max_retries=10, retry_delay=
             )
             response.raise_for_status()
             return response
-        except Exception as e:
-            if attempt < max_retries - 1:  # Don't sleep on the last attempt
+        except requests.exceptions.HTTPError as e:
+            # Check for HTTPError. e.response will not be None here.
+            if e.response.status_code == 422:
+                logger.error(f"Request failed with 422 Unprocessable Entity. Not retrying.")
+                return e
+
+            # For all other HTTP errors, proceed with the retry logic
+            if attempt < max_retries - 1:
                 if not quiet:
-                    logger.warning(f"Request failed ({type(e).__name__}: {str(e)}), retrying in {retry_delay} seconds... (Attempt {attempt + 1}/{max_retries})")
+                    logger.warning(f"Request failed ({e.response.status_code}: {e.response.reason}), retrying in {retry_delay} seconds... (Attempt {attempt + 1}/{max_retries})")
                 time.sleep(retry_delay)
-                retry_delay *= 2  # Exponential backoff
+                retry_delay *= 2
+            else:
+                if not quiet:
+                    logger.error(f"Request failed after {max_retries} attempts: {e}")
+                return e
+        except Exception as e:
+            # This catch block handles network errors where no response object is available.
+            # We need to check if the response object exists before trying to access it.
+            status_code = getattr(e.response, 'status_code', 'N/A')
+
+            if attempt < max_retries - 1:
+                if not quiet:
+                    logger.warning(f"Request failed ({type(e).__name__}: {str(e)}, Status: {status_code}), retrying in {retry_delay} seconds... (Attempt {attempt + 1}/{max_retries})")
+                time.sleep(retry_delay)
+                retry_delay *= 2
             else:
                 if not quiet:
                     logger.error(f"Request failed after {max_retries} attempts: {str(e)}")
-                return e  # Return the exception if we've exhausted all retries
+                return e
 
-def retry_with_backoff(operation, operation_name, max_retries=3, retry_delay=2, quiet=False):
+def retry_with_backoff(operation, operation_name, max_retries=2, retry_delay=2, quiet=False):
     """
     Generic retry function with exponential backoff for any operation
     Args:
@@ -416,7 +436,7 @@ def run_metrics_updater(metric_value_url, metric_name_url, metric_aggregation_ur
         retry_with_backoff(
             collect_and_update_metrics,
             "Periodic metrics collection",
-            max_retries=3,
+            max_retries=2,
             quiet=True  # Keep background updates quiet unless they completely fail
         )
 
@@ -490,7 +510,7 @@ def run_exporter(port, metric_value_url, metric_name_url, metric_aggregation_url
     initial_success = retry_with_backoff(
         initial_metrics_collection,
         "Initial metrics collection",
-        max_retries=5,  # More retries for initial collection since it's critical
+        max_retries=2,  # More retries for initial collection since it's critical
         quiet=quiet
     )
 
