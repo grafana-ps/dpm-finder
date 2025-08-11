@@ -12,6 +12,7 @@ import threading
 import logging
 import signal
 import sys
+from datetime import datetime, timedelta
 from queue import Queue
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from requests.auth import HTTPBasicAuth
@@ -37,13 +38,13 @@ def update_prometheus_metrics(filtered_dpm, performance_data):
     """Update Prometheus metrics with latest DPM data"""
     # Clear existing DPM metrics
     dpm_metric.clear()
-    
+
     # Update DPM metrics for each metric
     for metric_name, dpm_value in filtered_dpm.items():
         # Create safe metric name for label
         safe_metric_name = metric_name.replace('-', '_').replace('.', '_').replace(':', '_')
         dpm_metric.labels(metric_name=safe_metric_name).set(float(dpm_value))
-    
+
     # Update performance metrics
     runtime_metric.set(performance_data['total_time'])
     avg_processing_time_metric.set(performance_data['avg_metric_time'])
@@ -117,12 +118,12 @@ def get_metric_json(url, username, api_key, quiet=False):
         auth=HTTPBasicAuth(username, api_key),
         quiet=quiet
     )
-    
+
     if isinstance(response, Exception):
         if not quiet:
             logger.error(f"Error retrieving metric names: {str(response)}")
         return None
-    
+
     try:
         return response.json()
     except Exception as e:
@@ -136,12 +137,12 @@ def process_metric_chunk(chunk, metric_value_url, username, api_key, results_que
     """
     chunk_results = {}
     chunk_times = []
-    
+
     for metric in chunk:
         metric_start_time = time.time()
         if not quiet:
             logger.debug(f"Processing metric: {metric}")
-        
+
         query = 'count_over_time(%s{__ignore_usage__=""}[5m])/5'%(metric)
         response = make_request_with_retry(
             metric_value_url,
@@ -149,13 +150,13 @@ def process_metric_chunk(chunk, metric_value_url, username, api_key, results_que
             params={"query": query},
             quiet=quiet
         )
-        
+
         if isinstance(response, Exception):
             if not quiet:
                 logger.error(f"Error processing metric {metric}: {str(response)}")
             chunk_times.append(time.time() - metric_start_time)
             continue
-            
+
         try:
             query_data = response.json().get("data", {}).get("result", [])
             if query_data and len(query_data) > 0 and len(query_data[0].get('value', [])) > 1:
@@ -163,13 +164,13 @@ def process_metric_chunk(chunk, metric_value_url, username, api_key, results_que
         except Exception as e:
             if not quiet:
                 logger.error(f"Error parsing response for metric {metric}: {str(e)}")
-        
+
         chunk_times.append(time.time() - metric_start_time)
-    
+
     results_queue.put((chunk_results, chunk_times))
 
 def get_metric_rates(metric_value_url, username, api_key, metric_names, metric_aggregations, output_format='csv', min_dpm=1, quiet=False, thread_count=10, exporter_mode=False):
-    """ 
+    """
     Calculate the metric rates
     Args:
         metric_value_url: URL for querying metric values
@@ -187,10 +188,10 @@ def get_metric_rates(metric_value_url, username, api_key, metric_names, metric_a
     """
     # Ensure thread count is at least 1
     thread_count = max(1, thread_count)
-    
+
     start_time = time.time()
     dpm_data = {}
-    
+
     if metric_names is None:
         if not quiet:
             logger.error("Failed to retrieve metric names")
@@ -213,7 +214,7 @@ def get_metric_rates(metric_value_url, username, api_key, metric_names, metric_a
         except Exception as e:
             if not quiet:
                 logger.warning(f"Error processing aggregation rules: {str(e)}")
-    
+
     # Filter metrics that don't end with _count, _bucket, _sum, don't begin with grafana_, and are not in aggregation rules
     filtered_metrics = [
         metric for metric in metric_names['data']
@@ -221,24 +222,24 @@ def get_metric_rates(metric_value_url, username, api_key, metric_names, metric_a
         and not metric.startswith('grafana_')
         and metric not in aggregated_metrics
     ]
-    
+
     if not quiet:
         logger.info(f"Filtered to {len(filtered_metrics)} metrics - checking for DPM")
-    
+
     # Create a queue for results
     results_queue = Queue()
     processing_times = []
-    
+
     # Calculate chunk size based on number of metrics and threads
     total_metrics = len(filtered_metrics)
     chunk_size = max(1, total_metrics // thread_count)  # Ensure at least 1 metric per chunk
-    
+
     # Split metrics into chunks for parallel processing
     metric_chunks = [filtered_metrics[i:i + chunk_size] for i in range(0, total_metrics, chunk_size)]
-    
+
     if not quiet:
         logger.info(f"Processing {total_metrics} metrics in {len(metric_chunks)} chunks using {thread_count} threads")
-    
+
     # Create thread pool with the specified number of threads
     with ThreadPoolExecutor(max_workers=thread_count) as executor:
         # Submit tasks to the thread pool
@@ -246,7 +247,7 @@ def get_metric_rates(metric_value_url, username, api_key, metric_names, metric_a
             executor.submit(process_metric_chunk, chunk, metric_value_url, username, api_key, results_queue, quiet)
             for chunk in metric_chunks
         ]
-        
+
         # Wait for all tasks to complete
         for future in as_completed(futures):
             try:
@@ -254,7 +255,7 @@ def get_metric_rates(metric_value_url, username, api_key, metric_names, metric_a
             except Exception as e:
                 if not quiet:
                     logger.error(f"Error in thread: {str(e)}")
-    
+
     # Collect results from queue
     while not results_queue.empty():
         chunk_results, chunk_times = results_queue.get()
@@ -263,7 +264,7 @@ def get_metric_rates(metric_value_url, username, api_key, metric_names, metric_a
 
     total_time = time.time() - start_time
     avg_metric_time = sum(processing_times) / len(processing_times) if processing_times else 0
-    
+
     if not quiet:
         logger.info("Timing Statistics:")
         logger.info(f"Total runtime: {total_time:.2f} seconds")
@@ -275,11 +276,11 @@ def get_metric_rates(metric_value_url, username, api_key, metric_names, metric_a
     metrics_above_threshold = 0
     # Sort items by DPM value in descending order
     sorted_dpm = sorted(dpm_data.items(), key=lambda x: float(x[1]), reverse=True)
-    
+
     # Filter metrics above threshold
     filtered_dpm = {metric_name: dpm for metric_name, dpm in sorted_dpm if float(dpm) > min_dpm}
     metrics_above_threshold = len(filtered_dpm)
-    
+
     if exporter_mode:
         # Update Prometheus metrics for exporter mode
         performance_data = {
@@ -293,7 +294,7 @@ def get_metric_rates(metric_value_url, username, api_key, metric_names, metric_a
         if not quiet:
             logger.info(f"Updated exporter metrics: {metrics_above_threshold} metrics above threshold")
         return True
-    
+
     if output_format == 'csv':
         with open("metric_rates.csv", "w", encoding="utf-8") as f:
             # Write CSV header
@@ -334,20 +335,20 @@ def get_metric_rates(metric_value_url, username, api_key, metric_names, metric_a
                 if not quiet:
                     print(output_line, end='')
                 f.write(output_line)
-            
+
             # Add performance metrics
             f.write("\n# HELP dpm_finder_runtime_seconds Total runtime of the DPM finder script\n")
             f.write("# TYPE dpm_finder_runtime_seconds gauge\n")
             f.write(f"dpm_finder_runtime_seconds {total_time}\n")
-            
+
             f.write("\n# HELP dpm_finder_avg_metric_process_seconds Average time to process each metric\n")
             f.write("# TYPE dpm_finder_avg_metric_process_seconds gauge\n")
             f.write(f"dpm_finder_avg_metric_process_seconds {avg_metric_time}\n")
-            
+
             f.write("\n# HELP dpm_finder_metrics_processed_total Total number of metrics processed\n")
             f.write("# TYPE dpm_finder_metrics_processed_total counter\n")
             f.write(f"dpm_finder_metrics_processed_total {len(filtered_metrics)}\n")
-            
+
             f.write("\n# HELP dpm_finder_processing_rate_metrics_per_second Rate of metric processing\n")
             f.write("# TYPE dpm_finder_processing_rate_metrics_per_second gauge\n")
             f.write(f"dpm_finder_processing_rate_metrics_per_second {len(filtered_metrics)/total_time}\n")
@@ -362,34 +363,34 @@ def get_metric_rates(metric_value_url, username, api_key, metric_names, metric_a
                 if not quiet:
                     print(output_line, end='')
                 f.write(output_line)
-            
+
             # Add timing information to the text output
             f.write("\nPerformance Metrics:\n")
             f.write(f"Total runtime: {total_time:.2f} seconds\n")
             f.write(f"Average time per metric: {avg_metric_time:.3f} seconds\n")
             f.write(f"Total metrics processed: {len(filtered_metrics)}\n")
             f.write(f"Metrics processing rate: {len(filtered_metrics)/total_time:.1f} metrics/second\n")
-    
+
     if not quiet:
         logger.info(f"Total number of metrics with DPM > {min_dpm}: {metrics_above_threshold}")
 
     return True
 
-def run_metrics_updater(metric_value_url, metric_name_url, metric_aggregation_url, username, api_key, 
+def run_metrics_updater(metric_value_url, metric_name_url, metric_aggregation_url, username, api_key,
                        min_dpm, thread_count, update_interval, quiet):
     """
     Run periodic metrics updates for exporter mode
     """
     logger.info(f"Starting metrics updater with {update_interval}s interval")
-    
+
     while not shutdown_event.is_set():
         def collect_and_update_metrics():
             logger.debug("Fetching metrics for update...")
-            
+
             # Get fresh metric data
             metric_names = get_metric_json(metric_name_url, username, api_key, quiet=True)
             metric_aggregations = get_metric_json(metric_aggregation_url, username, api_key, quiet=True)
-            
+
             if metric_names is not None:
                 # Calculate metrics in exporter mode
                 success = get_metric_rates(
@@ -410,7 +411,7 @@ def run_metrics_updater(metric_value_url, metric_name_url, metric_aggregation_ur
                     raise Exception("Failed to calculate metric rates")
             else:
                 raise Exception("Failed to fetch metric names")
-        
+
         # Use retry logic with exponential backoff for metrics collection
         retry_with_backoff(
             collect_and_update_metrics,
@@ -418,11 +419,11 @@ def run_metrics_updater(metric_value_url, metric_name_url, metric_aggregation_ur
             max_retries=3,
             quiet=True  # Keep background updates quiet unless they completely fail
         )
-        
+
         # Wait for next update or shutdown
         if shutdown_event.wait(timeout=update_interval):
             break
-    
+
     logger.info("Metrics updater stopped")
 
 def run_exporter(port, metric_value_url, metric_name_url, metric_aggregation_url, username, api_key,
@@ -434,11 +435,11 @@ def run_exporter(port, metric_value_url, metric_name_url, metric_aggregation_url
         logger.info(f"Received signal {signum}, shutting down...")
         shutdown_event.set()
         sys.exit(0)
-    
+
     # Set up signal handlers
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
-    
+
     # Set exporter info
     exporter_info.info({
         'version': '1.0.0',
@@ -446,25 +447,25 @@ def run_exporter(port, metric_value_url, metric_name_url, metric_aggregation_url
         'update_interval_seconds': str(update_interval),
         'thread_count': str(thread_count)
     })
-    
+
     # Start HTTP server immediately using prometheus_client
     logger.info(f"Starting DPM finder exporter on port {port}")
     logger.info(f"Metrics available at: http://localhost:{port}/metrics")
-    
+
     try:
         start_http_server(port)
         logger.info("Exporter server started successfully")
     except Exception as e:
         logger.error(f"Error starting exporter server: {e}")
         sys.exit(1)
-    
+
     # Get initial metrics after server is running
     logger.info("Performing initial metrics collection...")
-    
+
     def initial_metrics_collection():
         metric_names = get_metric_json(metric_name_url, username, api_key, quiet=quiet)
         metric_aggregations = get_metric_json(metric_aggregation_url, username, api_key, quiet=quiet)
-        
+
         if metric_names is not None:
             success = get_metric_rates(
                 metric_value_url,
@@ -484,7 +485,7 @@ def run_exporter(port, metric_value_url, metric_name_url, metric_aggregation_url
                 raise Exception("Failed to calculate initial metric rates")
         else:
             raise Exception("Failed to fetch metric names for initial collection")
-    
+
     # Use retry logic with exponential backoff for initial collection
     initial_success = retry_with_backoff(
         initial_metrics_collection,
@@ -492,10 +493,10 @@ def run_exporter(port, metric_value_url, metric_name_url, metric_aggregation_url
         max_retries=5,  # More retries for initial collection since it's critical
         quiet=quiet
     )
-    
+
     if not initial_success and not quiet:
         logger.warning("Initial metrics collection failed, continuing with empty metrics until next update cycle")
-    
+
     # Start metrics updater thread for periodic updates
     updater_thread = threading.Thread(
         target=run_metrics_updater,
@@ -504,18 +505,18 @@ def run_exporter(port, metric_value_url, metric_name_url, metric_aggregation_url
         daemon=True
     )
     updater_thread.start()
-    
+
     try:
         # Keep the main thread alive
         while not shutdown_event.is_set():
             time.sleep(1)
-            
+
     except KeyboardInterrupt:
         logger.info("Shutting down server...")
     finally:
         shutdown_event.set()
 
-def main(): 
+def main():
     # Set up logging
     logging.basicConfig(
         level=logging.INFO,
@@ -523,20 +524,20 @@ def main():
         datefmt='%Y-%m-%d %H:%M:%S'
     )
     logger = logging.getLogger(__name__)
-    
+
     parser = argparse.ArgumentParser(
         description="""
         DPM Finder - A tool to calculate Data Points per Minute (DPM) for Prometheus metrics.
         This script connects to a Prometheus instance, retrieves all metric names,
         calculates their DPM, and outputs the results either in CSV or text format.
         Results are filtered to show only metrics above a specified DPM threshold.
-        
+
         This script is not intended to be run frequently.
         """,
         formatter_class=argparse.RawDescriptionHelpFormatter,
         add_help=False  # Disable default help to add our own
     )
-    
+
     # Add custom help option
     parser.add_argument(
         '-h', '--help',
@@ -546,7 +547,7 @@ def main():
     )
 
     parser.add_argument(
-        '-f', '--format', 
+        '-f', '--format',
         choices=['csv', 'text', 'txt', 'json', 'prom'],
         default='csv',
         help='Output format (default: csv). Note: "text" and "txt" are synonyms'
@@ -605,11 +606,11 @@ def main():
         if not args.quiet:
             logger.warning(f"Thread count {args.threads} is less than 1, setting to 1")
         args.threads = 1
-    
+
     # Validate update interval for exporter mode
     if args.exporter and args.update_interval < 30:
         logger.warning(f"Update interval {args.update_interval}s is very short, consider using 30s or more")
-    
+
     # Validate port
     if args.exporter and (args.port < 1 or args.port > 65535):
         logger.error(f"Invalid port {args.port}, must be between 1 and 65535")
@@ -633,7 +634,17 @@ def main():
     username=os.getenv("PROMETHEUS_USERNAME")
     api_key=os.getenv("PROMETHEUS_API_KEY")
     metric_value_url=f"{prometheus_endpoint}/api/prom/api/v1/query"
-    metric_name_url=f"{prometheus_endpoint}/api/prom/api/v1/label/__name__/values"
+    # Calculate the Unix timestamps for the last 24 hours
+    current_time = datetime.now()
+    twenty_four_hours_ago = current_time - timedelta(hours=24)
+
+    end_timestamp = int(current_time.timestamp())
+    start_timestamp = int(twenty_four_hours_ago.timestamp())
+
+    # Construct the API endpoint with start and end timestamps
+    metric_name_url = f"{prometheus_endpoint}/api/prom/api/v1/label/__name__/values?start={start_timestamp}&end={end_timestamp}"
+
+    #metric_name_url=f"{prometheus_endpoint}/api/prom/api/v1/label/__name__/values"
     metric_aggregation_url=f"{prometheus_endpoint}/aggregations/rules"
 
     metric_names = get_metric_json(metric_name_url, username, api_key, quiet=args.quiet)
