@@ -1,9 +1,0 @@
-# Requirements for Cardinality Analyzer with AI Analysis features
-# This includes all dependencies needed for the AI-powered analysis functionality
-
-# Core dependencies (same as requirements.txt)
-requests>=2.31.0
-python-dotenv>=1.0.0
-
-# AI analysis dependency
-openai>=1.0.0
