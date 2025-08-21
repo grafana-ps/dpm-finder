@@ -131,7 +131,7 @@ def get_metric_json(url, username, api_key, quiet=False, timeout=60):
             logger.error(f"Error parsing metric names response: {str(e)}")
         return None
 
-def process_metric_chunk(chunk, metric_value_url, username, api_key, results_queue, quiet=False, timeout=60):
+def process_metric_chunk(chunk, metric_value_url, username, api_key, results_queue, quiet=False, show_labels=False, filter_labels=None, timeout=60):
     """
     Process a chunk of metrics and put results in the queue
     """
@@ -143,7 +143,13 @@ def process_metric_chunk(chunk, metric_value_url, username, api_key, results_que
         if not quiet:
             logger.debug(f"Processing metric: {metric}")
         
-        query = 'count_over_time(%s{__ignore_usage__=""}[5m])/5'%(metric)
+        # Build query with optional label filter
+        base_query = f'{metric}{{__ignore_usage__=""'
+        if filter_labels:
+            base_query += f',{filter_labels}'
+        base_query += '}'
+        
+        query = f'count_over_time({base_query}[5m])/5'
         response = make_request_with_retry(
             metric_value_url,
             auth=HTTPBasicAuth(username, api_key),
@@ -160,8 +166,32 @@ def process_metric_chunk(chunk, metric_value_url, username, api_key, results_que
             
         try:
             query_data = response.json().get("data", {}).get("result", [])
-            if query_data and len(query_data) > 0 and len(query_data[0].get('value', [])) > 1:
-                chunk_results[metric] = query_data[0]['value'][1]
+            if query_data and len(query_data) > 0:
+                for result in query_data:
+                    if len(result.get('value', [])) > 1:
+                        dpm_value = result['value'][1]
+                        
+                        if show_labels:
+                            # Extract labels from the result
+                            labels = result.get('metric', {})
+                            # Remove internal labels
+                            labels = {k: v for k, v in labels.items() if k != '__name__' and not k.startswith('__')}
+                            
+                            # Create a unique key for this metric + label combination
+                            if labels:
+                                label_str = ','.join([f'{k}="{v}"' for k, v in sorted(labels.items())])
+                                metric_key = f'{metric}{{{label_str}}}'
+                            else:
+                                metric_key = metric
+                                
+                            chunk_results[metric_key] = {
+                                'dpm': dpm_value,
+                                'metric_name': metric,
+                                'labels': labels
+                            }
+                        else:
+                            # Original behavior - just store the DPM value
+                            chunk_results[metric] = dpm_value
         except Exception as e:
             if not quiet:
                 logger.error(f"Error parsing response for metric {metric}: {str(e)}")
@@ -170,7 +200,7 @@ def process_metric_chunk(chunk, metric_value_url, username, api_key, results_que
     
     results_queue.put((chunk_results, chunk_times))
 
-def get_metric_rates(metric_value_url, username, api_key, metric_names, metric_aggregations, output_format='csv', min_dpm=1, quiet=False, thread_count=10, exporter_mode=False, timeout=60):
+def get_metric_rates(metric_value_url, username, api_key, metric_names, metric_aggregations, output_format='csv', min_dpm=1, quiet=False, thread_count=10, exporter_mode=False, show_labels=False, top_n=None, sort_by='dpm', filter_labels=None, timeout=60):
     """ 
     Calculate the metric rates
     Args:
@@ -184,6 +214,10 @@ def get_metric_rates(metric_value_url, username, api_key, metric_names, metric_a
         quiet: If True, suppress progress output
         thread_count: Number of threads to use for processing (minimum: 1)
         exporter_mode: If True, calculate metrics for exporter mode
+        show_labels: If True, include metric labels in output
+        top_n: Show only top N metrics (None for all)
+        sort_by: Sort by 'dpm' or 'name'
+        filter_labels: Label filter string for metrics
     Returns:
         True if processing was successful, False otherwise
     """
@@ -245,7 +279,7 @@ def get_metric_rates(metric_value_url, username, api_key, metric_names, metric_a
     with ThreadPoolExecutor(max_workers=thread_count) as executor:
         # Submit tasks to the thread pool
         futures = [
-            executor.submit(process_metric_chunk, chunk, metric_value_url, username, api_key, results_queue, quiet, timeout)
+            executor.submit(process_metric_chunk, chunk, metric_value_url, username, api_key, results_queue, quiet, show_labels, filter_labels, timeout)
             for chunk in metric_chunks
         ]
         
@@ -275,11 +309,35 @@ def get_metric_rates(metric_value_url, username, api_key, metric_names, metric_a
         logger.info(f"Effective threads used: {min(thread_count, len(metric_chunks))}")
 
     metrics_above_threshold = 0
-    # Sort items by DPM value in descending order
-    sorted_dpm = sorted(dpm_data.items(), key=lambda x: float(x[1]), reverse=True)
+    
+    # Handle different data structures based on show_labels
+    if show_labels:
+        # Extract DPM values for sorting and filtering
+        dpm_items = [(k, v['dpm'] if isinstance(v, dict) else v) for k, v in dpm_data.items()]
+    else:
+        dpm_items = list(dpm_data.items())
+    
+    # Sort based on sort_by parameter
+    if sort_by == 'dpm':
+        sorted_items = sorted(dpm_items, key=lambda x: float(x[1]), reverse=True)
+    else:  # sort by name
+        sorted_items = sorted(dpm_items, key=lambda x: x[0])
     
     # Filter metrics above threshold
-    filtered_dpm = {metric_name: dpm for metric_name, dpm in sorted_dpm if float(dpm) > min_dpm}
+    filtered_items = [(metric_name, dpm) for metric_name, dpm in sorted_items if float(dpm) > min_dpm]
+    
+    # Apply top_n limit if specified
+    if top_n is not None and top_n > 0:
+        filtered_items = filtered_items[:top_n]
+    
+    # Reconstruct the filtered dictionary
+    if show_labels:
+        filtered_dpm = {}
+        for metric_key, _ in filtered_items:
+            filtered_dpm[metric_key] = dpm_data[metric_key]
+    else:
+        filtered_dpm = dict(filtered_items)
+    
     metrics_above_threshold = len(filtered_dpm)
     
     if exporter_mode:
@@ -299,18 +357,41 @@ def get_metric_rates(metric_value_url, username, api_key, metric_names, metric_a
     if output_format == 'csv':
         with open("metric_rates.csv", "w", encoding="utf-8") as f:
             # Write CSV header
-            f.write("metric_name,dpm\n")
-            for metric_name, dpm in filtered_dpm.items():
-                if not quiet:
-                    print(f"{metric_name},{dpm}")
-                f.write(f"{metric_name},{dpm}\n")
+            if show_labels:
+                f.write("metric_name,dpm,labels\n")
+                for metric_key, data in filtered_dpm.items():
+                    metric_name = data['metric_name']
+                    dpm = data['dpm']
+                    labels = data['labels']
+                    label_str = ','.join([f'{k}={v}' for k, v in sorted(labels.items())]) if labels else ''
+                    if not quiet:
+                        print(f"{metric_name},{dpm},\"{label_str}\"")
+                    f.write(f"{metric_name},{dpm},\"{label_str}\"\n")
+            else:
+                f.write("metric_name,dpm\n")
+                for metric_name, dpm in filtered_dpm.items():
+                    if not quiet:
+                        print(f"{metric_name},{dpm}")
+                    f.write(f"{metric_name},{dpm}\n")
     elif output_format == 'json':
         import json
-        output_data = {
-            "metrics": [
+        if show_labels:
+            metrics_list = []
+            for metric_key, data in filtered_dpm.items():
+                metric_entry = {
+                    "metric_name": data['metric_name'],
+                    "dpm": float(data['dpm']),
+                    "labels": data['labels']
+                }
+                metrics_list.append(metric_entry)
+        else:
+            metrics_list = [
                 {"metric_name": metric_name, "dpm": float(dpm)}
                 for metric_name, dpm in filtered_dpm.items()
-            ],
+            ]
+        
+        output_data = {
+            "metrics": metrics_list,
             "total_metrics_above_threshold": metrics_above_threshold,
             "performance_metrics": {
                 "total_runtime_seconds": round(total_time, 2),
@@ -329,13 +410,36 @@ def get_metric_rates(metric_value_url, username, api_key, metric_names, metric_a
             # Add HELP and TYPE metadata for DPM metrics
             f.write("# HELP metric_dpm_rate Data points per minute for each metric\n")
             f.write("# TYPE metric_dpm_rate gauge\n")
-            for metric_name, dpm in filtered_dpm.items():
-                # Escape special characters in metric names as per Prometheus format
-                safe_metric_name = metric_name.replace('-', '_').replace('.', '_').replace(':', '_')
-                output_line = f'metric_dpm_rate{{metric_name="{safe_metric_name}"}} {dpm}\n'
-                if not quiet:
-                    print(output_line, end='')
-                f.write(output_line)
+            
+            if show_labels:
+                for metric_key, data in filtered_dpm.items():
+                    metric_name = data['metric_name']
+                    dpm = data['dpm']
+                    labels = data['labels']
+                    
+                    # Build label string including metric name and any additional labels
+                    safe_metric_name = metric_name.replace('-', '_').replace('.', '_').replace(':', '_')
+                    label_parts = [f'metric_name="{safe_metric_name}"']
+                    
+                    # Add other labels
+                    for k, v in sorted(labels.items()):
+                        # Escape label values
+                        safe_value = v.replace('\\', '\\\\').replace('"', '\\"').replace('\n', '\\n')
+                        label_parts.append(f'{k}="{safe_value}"')
+                    
+                    label_str = ','.join(label_parts)
+                    output_line = f'metric_dpm_rate{{{label_str}}} {dpm}\n'
+                    if not quiet:
+                        print(output_line, end='')
+                    f.write(output_line)
+            else:
+                for metric_name, dpm in filtered_dpm.items():
+                    # Escape special characters in metric names as per Prometheus format
+                    safe_metric_name = metric_name.replace('-', '_').replace('.', '_').replace(':', '_')
+                    output_line = f'metric_dpm_rate{{metric_name="{safe_metric_name}"}} {dpm}\n'
+                    if not quiet:
+                        print(output_line, end='')
+                    f.write(output_line)
             
             # Add performance metrics
             f.write("\n# HELP dpm_finder_runtime_seconds Total runtime of the DPM finder script\n")
@@ -359,11 +463,28 @@ def get_metric_rates(metric_value_url, username, api_key, metric_names, metric_a
             if not quiet:
                 print("\nMetrics and their DPM values:")
             f.write("Metrics and their DPM values:\n")
-            for metric_name, dpm in filtered_dpm.items():
-                output_line = f"{metric_name}: {dpm}\n"
-                if not quiet:
-                    print(output_line, end='')
-                f.write(output_line)
+            
+            if show_labels:
+                for metric_key, data in filtered_dpm.items():
+                    metric_name = data['metric_name']
+                    dpm = data['dpm']
+                    labels = data['labels']
+                    
+                    if labels:
+                        label_str = ' {' + ', '.join([f'{k}="{v}"' for k, v in sorted(labels.items())]) + '}'
+                    else:
+                        label_str = ''
+                    
+                    output_line = f"{metric_name}{label_str}: {dpm}\n"
+                    if not quiet:
+                        print(output_line, end='')
+                    f.write(output_line)
+            else:
+                for metric_name, dpm in filtered_dpm.items():
+                    output_line = f"{metric_name}: {dpm}\n"
+                    if not quiet:
+                        print(output_line, end='')
+                    f.write(output_line)
             
             # Add timing information to the text output
             f.write("\nPerformance Metrics:\n")
@@ -595,6 +716,29 @@ def main():
         help='How often to update metrics in exporter mode, in seconds (default: 86400 or 1 day)'
     )
     parser.add_argument(
+        '-l', '--show-labels',
+        action='store_true',
+        help='Show labels for each metric (requires additional queries)'
+    )
+    parser.add_argument(
+        '-n', '--top-n',
+        type=int,
+        default=None,
+        help='Show only top N metrics by DPM (default: show all above threshold)'
+    )
+    parser.add_argument(
+        '-s', '--sort-by',
+        choices=['dpm', 'name'],
+        default='dpm',
+        help='Sort metrics by DPM value or metric name (default: dpm)'
+    )
+    parser.add_argument(
+        '--filter-labels',
+        type=str,
+        default=None,
+        help='Filter metrics by label patterns (e.g., "job=my-app" or "env=~prod.*")'
+    )
+    parser.add_argument(
         '--timeout',
         type=int,
         default=60,
@@ -642,6 +786,12 @@ def main():
         logger.info(f"- Quiet mode: {args.quiet}")
         logger.info(f"- Verbose mode: {args.verbose}")
         logger.info(f"- Thread count: {args.threads}")
+        logger.info(f"- Show labels: {args.show_labels}")
+        if args.top_n:
+            logger.info(f"- Top N metrics: {args.top_n}")
+        logger.info(f"- Sort by: {args.sort_by}")
+        if args.filter_labels:
+            logger.info(f"- Label filter: {args.filter_labels}")
         logger.info(f"- Request timeout: {args.timeout}s")
 
     load_dotenv()
@@ -683,6 +833,10 @@ def main():
             min_dpm=args.min_dpm,
             quiet=args.quiet,
             thread_count=args.threads,
+            show_labels=args.show_labels,
+            top_n=args.top_n,
+            sort_by=args.sort_by,
+            filter_labels=args.filter_labels,
             timeout=args.timeout
         )
 
