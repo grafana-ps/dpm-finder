@@ -51,7 +51,7 @@ def update_prometheus_metrics(filtered_dpm, performance_data):
     processing_rate_metric.set(performance_data['processing_rate'])
     last_update_metric.set(performance_data['last_update'])
 
-def make_request_with_retry(url, auth, params=None, max_retries=10, retry_delay=2, quiet=False):
+def make_request_with_retry(url, auth, params=None, max_retries=10, retry_delay=2, quiet=False, timeout=60):
     """
     Make HTTP request with retry logic for any error with exponential backoff
     Returns:
@@ -64,7 +64,7 @@ def make_request_with_retry(url, auth, params=None, max_retries=10, retry_delay=
                 url,
                 auth=auth,
                 params=params,
-                timeout=15,
+                timeout=timeout,
             )
             response.raise_for_status()
             return response
@@ -105,7 +105,7 @@ def retry_with_backoff(operation, operation_name, max_retries=3, retry_delay=2, 
                     logger.error(f"{operation_name} failed after {max_retries} attempts: {str(e)}")
                 return None
 
-def get_metric_json(url, username, api_key, quiet=False):
+def get_metric_json(url, username, api_key, quiet=False, timeout=60):
     """
     Get the metric names from the Prometheus API
     Returns:
@@ -115,7 +115,8 @@ def get_metric_json(url, username, api_key, quiet=False):
     response = make_request_with_retry(
         url,
         auth=HTTPBasicAuth(username, api_key),
-        quiet=quiet
+        quiet=quiet,
+        timeout=timeout
     )
     
     if isinstance(response, Exception):
@@ -130,7 +131,7 @@ def get_metric_json(url, username, api_key, quiet=False):
             logger.error(f"Error parsing metric names response: {str(e)}")
         return None
 
-def process_metric_chunk(chunk, metric_value_url, username, api_key, results_queue, quiet=False, show_labels=False, filter_labels=None):
+def process_metric_chunk(chunk, metric_value_url, username, api_key, results_queue, quiet=False, show_labels=False, filter_labels=None, timeout=60):
     """
     Process a chunk of metrics and put results in the queue
     """
@@ -153,7 +154,8 @@ def process_metric_chunk(chunk, metric_value_url, username, api_key, results_que
             metric_value_url,
             auth=HTTPBasicAuth(username, api_key),
             params={"query": query},
-            quiet=quiet
+            quiet=quiet,
+            timeout=timeout
         )
         
         if isinstance(response, Exception):
@@ -198,7 +200,7 @@ def process_metric_chunk(chunk, metric_value_url, username, api_key, results_que
     
     results_queue.put((chunk_results, chunk_times))
 
-def get_metric_rates(metric_value_url, username, api_key, metric_names, metric_aggregations, output_format='csv', min_dpm=1, quiet=False, thread_count=10, exporter_mode=False, show_labels=False, top_n=None, sort_by='dpm', filter_labels=None):
+def get_metric_rates(metric_value_url, username, api_key, metric_names, metric_aggregations, output_format='csv', min_dpm=1, quiet=False, thread_count=10, exporter_mode=False, show_labels=False, top_n=None, sort_by='dpm', filter_labels=None, timeout=60):
     """ 
     Calculate the metric rates
     Args:
@@ -277,7 +279,7 @@ def get_metric_rates(metric_value_url, username, api_key, metric_names, metric_a
     with ThreadPoolExecutor(max_workers=thread_count) as executor:
         # Submit tasks to the thread pool
         futures = [
-            executor.submit(process_metric_chunk, chunk, metric_value_url, username, api_key, results_queue, quiet, show_labels, filter_labels)
+            executor.submit(process_metric_chunk, chunk, metric_value_url, username, api_key, results_queue, quiet, show_labels, filter_labels, timeout)
             for chunk in metric_chunks
         ]
         
@@ -497,7 +499,7 @@ def get_metric_rates(metric_value_url, username, api_key, metric_names, metric_a
     return True
 
 def run_metrics_updater(metric_value_url, metric_name_url, metric_aggregation_url, username, api_key, 
-                       min_dpm, thread_count, update_interval, quiet):
+                       min_dpm, thread_count, update_interval, quiet, timeout=60):
     """
     Run periodic metrics updates for exporter mode
     """
@@ -508,8 +510,8 @@ def run_metrics_updater(metric_value_url, metric_name_url, metric_aggregation_ur
             logger.debug("Fetching metrics for update...")
             
             # Get fresh metric data
-            metric_names = get_metric_json(metric_name_url, username, api_key, quiet=True)
-            metric_aggregations = get_metric_json(metric_aggregation_url, username, api_key, quiet=True)
+            metric_names = get_metric_json(metric_name_url, username, api_key, quiet=True, timeout=timeout)
+            metric_aggregations = get_metric_json(metric_aggregation_url, username, api_key, quiet=True, timeout=timeout)
             
             if metric_names is not None:
                 # Calculate metrics in exporter mode
@@ -522,7 +524,8 @@ def run_metrics_updater(metric_value_url, metric_name_url, metric_aggregation_ur
                     min_dpm=min_dpm,
                     quiet=True,  # Always quiet for background updates
                     thread_count=thread_count,
-                    exporter_mode=True
+                    exporter_mode=True,
+                    timeout=timeout
                 )
                 if success:
                     logger.debug("Metrics updated successfully")
@@ -547,7 +550,7 @@ def run_metrics_updater(metric_value_url, metric_name_url, metric_aggregation_ur
     logger.info("Metrics updater stopped")
 
 def run_exporter(port, metric_value_url, metric_name_url, metric_aggregation_url, username, api_key,
-                min_dpm, thread_count, update_interval, quiet):
+                min_dpm, thread_count, update_interval, quiet, timeout=60):
     """
     Run the Prometheus exporter server
     """
@@ -583,8 +586,8 @@ def run_exporter(port, metric_value_url, metric_name_url, metric_aggregation_url
     logger.info("Performing initial metrics collection...")
     
     def initial_metrics_collection():
-        metric_names = get_metric_json(metric_name_url, username, api_key, quiet=quiet)
-        metric_aggregations = get_metric_json(metric_aggregation_url, username, api_key, quiet=quiet)
+        metric_names = get_metric_json(metric_name_url, username, api_key, quiet=quiet, timeout=timeout)
+        metric_aggregations = get_metric_json(metric_aggregation_url, username, api_key, quiet=quiet, timeout=timeout)
         
         if metric_names is not None:
             success = get_metric_rates(
@@ -596,7 +599,8 @@ def run_exporter(port, metric_value_url, metric_name_url, metric_aggregation_url
                 min_dpm=min_dpm,
                 quiet=quiet,
                 thread_count=thread_count,
-                exporter_mode=True
+                exporter_mode=True,
+                timeout=timeout
             )
             if success:
                 logger.info("Initial metrics collection completed")
@@ -621,7 +625,7 @@ def run_exporter(port, metric_value_url, metric_name_url, metric_aggregation_url
     updater_thread = threading.Thread(
         target=run_metrics_updater,
         args=(metric_value_url, metric_name_url, metric_aggregation_url, username, api_key,
-              min_dpm, thread_count, update_interval, quiet),
+              min_dpm, thread_count, update_interval, quiet, timeout),
         daemon=True
     )
     updater_thread.start()
@@ -734,6 +738,12 @@ def main():
         default=None,
         help='Filter metrics by label patterns (e.g., "job=my-app" or "env=~prod.*")'
     )
+    parser.add_argument(
+        '--timeout',
+        type=int,
+        default=60,
+        help='Request timeout in seconds for Prometheus API calls (default: 60)'
+    )
     args = parser.parse_args()
 
     # Set logging level based on arguments
@@ -758,6 +768,11 @@ def main():
     if args.exporter and (args.port < 1 or args.port > 65535):
         logger.error(f"Invalid port {args.port}, must be between 1 and 65535")
         sys.exit(1)
+    
+    # Validate timeout
+    if args.timeout < 1:
+        logger.error(f"Invalid timeout {args.timeout}, must be at least 1 second")
+        sys.exit(1)
 
     if not args.quiet:
         if args.exporter:
@@ -777,17 +792,19 @@ def main():
         logger.info(f"- Sort by: {args.sort_by}")
         if args.filter_labels:
             logger.info(f"- Label filter: {args.filter_labels}")
+        logger.info(f"- Request timeout: {args.timeout}s")
 
     load_dotenv()
     prometheus_endpoint=os.getenv("PROMETHEUS_ENDPOINT")
     username=os.getenv("PROMETHEUS_USERNAME")
     api_key=os.getenv("PROMETHEUS_API_KEY")
+
     metric_value_url=f"{prometheus_endpoint}/api/prom/api/v1/query"
     metric_name_url=f"{prometheus_endpoint}/api/prom/api/v1/label/__name__/values"
     metric_aggregation_url=f"{prometheus_endpoint}/aggregations/rules"
 
-    metric_names = get_metric_json(metric_name_url, username, api_key, quiet=args.quiet)
-    metric_aggregations = get_metric_json(metric_aggregation_url, username, api_key, quiet=args.quiet)
+    metric_names = get_metric_json(metric_name_url, username, api_key, quiet=args.quiet, timeout=args.timeout)
+    metric_aggregations = get_metric_json(metric_aggregation_url, username, api_key, quiet=args.quiet, timeout=args.timeout)
 
     if args.exporter:
         # Run as Prometheus exporter
@@ -801,7 +818,8 @@ def main():
             min_dpm=args.min_dpm,
             thread_count=args.threads,
             update_interval=args.update_interval,
-            quiet=args.quiet
+            quiet=args.quiet,
+            timeout=args.timeout
         )
     else:
         # Run one-time execution
@@ -818,7 +836,8 @@ def main():
             show_labels=args.show_labels,
             top_n=args.top_n,
             sort_by=args.sort_by,
-            filter_labels=args.filter_labels
+            filter_labels=args.filter_labels,
+            timeout=args.timeout
         )
 
 if __name__ == "__main__":
