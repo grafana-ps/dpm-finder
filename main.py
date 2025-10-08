@@ -6,7 +6,6 @@ import os
 import requests
 from requests.auth import HTTPBasicAuth
 from dotenv import load_dotenv
-from prometheus_client import CollectorRegistry, Gauge, push_to_gateway
 
 def get_metric_names(url,username,api_key):
     """
