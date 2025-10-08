@@ -6,6 +6,7 @@ import os
 import requests
 from requests.auth import HTTPBasicAuth
 from dotenv import load_dotenv
+from prometheus_client import CollectorRegistry, Gauge, push_to_gateway
 
 def get_metric_names(url,username,api_key):
     """
@@ -29,7 +30,7 @@ def get_metric_names(url,username,api_key):
 
 def get_metric_rates(url,username,api_key,metric_names):
     """ 
-    Calculate the metric rates
+    Calculate the metric rates and active series count
     """
     filtered_metrics = [
         metric for metric in metric_names['data']
@@ -37,21 +38,48 @@ def get_metric_rates(url,username,api_key,metric_names):
       ]
 
     with open("metric_rates.txt", "w", encoding="utf-8") as f:
+        # Write header row
+        f.write("METRIC_NAME DPM ACTIVE_SERIES TOTAL_ACTIVE_SERIES\n")
+        
         for metric in filtered_metrics:
             metric_name = metric
-            query = f"count_over_time({metric_name}[5m])/5"
-            query_response = requests.get(
-                metric_value_url,
+            
+            # Query 1: Get DPM (Data Points per Minute)
+            dpm_query = f"count_over_time({metric_name}[5m])/5"
+            dpm_response = requests.get(
+                url,
                 auth=HTTPBasicAuth(username, api_key),
-                params={"query": query},
+                params={"query": dpm_query},
                 timeout=15,
             )
-            query_data = query_response.json().get( "data", {}).get("result", [])
-            if query_data and len(query_data) > 0 and len(query_data[0].get('value', [])) > 1:
-                dpm = query_data[0]['value'][1]
-                if float(dpm) > 0:
-                    print(metric_name, dpm)
-                    f.write(f"{metric_name} {dpm}\n")
+            dpm_data = dpm_response.json().get("data", {}).get("result", [])
+            
+            # Query 2: Get active series count
+            series_query = f"count by (__name__) ({metric_name})"
+            series_response = requests.get(
+                url,
+                auth=HTTPBasicAuth(username, api_key),
+                params={"query": series_query},
+                timeout=15,
+            )
+            series_data = series_response.json().get("data", {}).get("result", [])
+            
+            # Process DPM data
+            dpm = 0
+            if dpm_data and len(dpm_data) > 0 and len(dpm_data[0].get('value', [])) > 1:
+                dpm = float(dpm_data[0]['value'][1])
+            
+            # Process series count data
+            active_series = 0
+            if series_data and len(series_data) > 0 and len(series_data[0].get('value', [])) > 1:
+                active_series = int(float(series_data[0]['value'][1]))
+            
+            # Only output metrics with data
+            if dpm > 0 and active_series > 0:
+                active_series_dpm = active_series * dpm
+                output_line = f"{metric_name} {dpm} {active_series} {active_series_dpm}"
+                print(output_line)
+                f.write(f"{output_line}\n")
             else:
                 continue
 

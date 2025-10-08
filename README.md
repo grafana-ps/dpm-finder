@@ -14,8 +14,20 @@ The script does the following:
 
 1.  **Retrieves all metrics** from a Prometheus instance using the `/api/v1/label/__name__/values` endpoint.
 2.  **Calculates DPM rate** for each metric using a PromQL query: `count_over_time({metric_name}[5m])/5`.
-3.  **Filters metrics** based on a DPM threshold (metrics with DPM > 1 by default).
-4.  **Writes results** to a text file named `metric_rates.txt`, listing metrics that exceed the threshold.
+3.  **Counts active series** for each metric using a PromQL query: `count by (__name__) ({metric_name})`.
+4.  **Calculates impact score** by multiplying DPM by the number of active series to quantify the true impact on Prometheus.
+5.  **Writes results** to a text file named `metric_rates.txt` with the format: `METRIC_NAME DPM ACTIVE_SERIES TOTAL_ACTIVE_SERIES`.
+
+## Output Format
+
+The script generates a tab-separated file with the following columns:
+
+- **METRIC_NAME**: The name of the metric
+- **DPM**: Data Points per Minute (total data points divided by 5 minutes)
+- **ACTIVE_SERIES**: Number of unique time series for this metric
+- **TOTAL_ACTIVE_SERIES**: Impact score calculated as `DPM × ACTIVE_SERIES`
+
+This format helps identify metrics that have the highest impact on your Prometheus instance, considering both data volume and cardinality.
 
 ## How To
 1.  ## Create .env with the following variables.  Please note the prometheus endpoint should not have anything after .net
