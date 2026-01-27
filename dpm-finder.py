@@ -69,6 +69,47 @@ def make_request_with_retry(url, auth, params=None, max_retries=10, retry_delay=
             response.raise_for_status()
             return response
         except Exception as e:
+            # If it's an HTTPError and status is a client error (4xx) except 429, don't retry
+            try:
+                from requests import HTTPError
+                if isinstance(e, HTTPError) and hasattr(e, 'response') and e.response is not None:
+                    status = e.response.status_code
+                    if 400 <= status < 500 and status != 429:
+                        if not quiet:
+                            # Extract detailed error from response where possible
+                            err_detail = None
+                            try:
+                                err_json = e.response.json()
+                                err_text = err_json.get("error")
+                                err_type = err_json.get("errorType")
+                                if err_text and err_type:
+                                    err_detail = f"{err_type}: {err_text}"
+                                elif err_text:
+                                    err_detail = err_text
+                            except Exception:
+                                pass
+                            if err_detail is None:
+                                try:
+                                    err_detail = (e.response.text or "").strip()
+                                except Exception:
+                                    err_detail = str(e)
+                            query_snippet = ""
+                            try:
+                                if isinstance(params, dict) and "query" in params and params["query"]:
+                                    # Limit to avoid overly long logs
+                                    q = str(params["query"])
+                                    query_snippet = f" query='{q[:200]}'"
+                            except Exception:
+                                pass
+                            # Special-case for aggregated metric error (422 commonly used by GEM/Mimir)
+                            if status == 422:
+                                logger.warning(f"Skipping due to Prometheus 422: {err_detail}.{query_snippet}")
+                            else:
+                                logger.warning(f"Skipping due to client error {status}: {err_detail}.{query_snippet}")
+                        return e
+            except Exception:
+                # If any issue determining status, fall back to retry path below
+                pass
             if attempt < max_retries - 1:  # Don't sleep on the last attempt
                 if not quiet:
                     logger.warning(f"Request failed ({type(e).__name__}: {str(e)}), retrying in {retry_delay} seconds... (Attempt {attempt + 1}/{max_retries})")
@@ -143,34 +184,66 @@ def process_metric_chunk(chunk, metric_value_url, username, api_key, results_que
         if not quiet:
             logger.debug(f"Processing metric: {metric}")
         
-        query = 'count_over_time(%s{__ignore_usage__=""}[5m])/5'%(metric)
-        response = make_request_with_retry(
+        # DPM over last 5 minutes, per minute
+        query_dpm = 'count_over_time(%s{__ignore_usage__=""}[5m])/5' % (metric)
+        response_dpm = make_request_with_retry(
             metric_value_url,
             auth=HTTPBasicAuth(username, api_key),
-            params={"query": query},
+            params={"query": query_dpm},
             quiet=quiet,
             timeout=timeout
         )
         
-        if isinstance(response, Exception):
+        if isinstance(response_dpm, Exception):
             if not quiet:
-                logger.error(f"Error processing metric {metric}: {str(response)}")
+                logger.error(f"Error processing metric {metric}: {str(response_dpm)}")
             chunk_times.append(time.time() - metric_start_time)
             continue
             
         try:
-            query_data = response.json().get("data", {}).get("result", [])
-            if query_data and len(query_data) > 0 and len(query_data[0].get('value', [])) > 1:
-                chunk_results[metric] = query_data[0]['value'][1]
+            query_data_dpm = response_dpm.json().get("data", {}).get("result", [])
+            if query_data_dpm and len(query_data_dpm) > 0 and len(query_data_dpm[0].get('value', [])) > 1:
+                dpm_value = query_data_dpm[0]['value'][1]
+            else:
+                dpm_value = None
         except Exception as e:
             if not quiet:
                 logger.error(f"Error parsing response for metric {metric}: {str(e)}")
+            dpm_value = None
+        
+        # Series cardinality (active series count at evaluation time)
+        # Keep the same selector pattern for consistency with DPM query
+        query_series = 'count(%s{__ignore_usage__=""})' % (metric)
+        response_series = make_request_with_retry(
+            metric_value_url,
+            auth=HTTPBasicAuth(username, api_key),
+            params={"query": query_series},
+            quiet=quiet,
+            timeout=timeout
+        )
+        
+        series_count_value = None
+        if not isinstance(response_series, Exception):
+            try:
+                query_data_series = response_series.json().get("data", {}).get("result", [])
+                if query_data_series and len(query_data_series) > 0 and len(query_data_series[0].get('value', [])) > 1:
+                    series_count_value = query_data_series[0]['value'][1]
+            except Exception as e:
+                if not quiet:
+                    logger.error(f"Error parsing series count for metric {metric}: {str(e)}")
+        
+        # Only store metrics we could compute a DPM for
+        if dpm_value is not None:
+            chunk_results[metric] = {
+                'dpm': dpm_value,
+                'series_count': series_count_value if series_count_value is not None else "0"
+            }
         
         chunk_times.append(time.time() - metric_start_time)
     
     results_queue.put((chunk_results, chunk_times))
 
-def get_metric_rates(metric_value_url, username, api_key, metric_names, metric_aggregations, output_format='csv', min_dpm=1, quiet=False, thread_count=10, exporter_mode=False, timeout=60):
+def get_metric_rates(metric_value_url, username, api_key, metric_names, metric_aggregations, output_format='csv', min_dpm=1, quiet=False, thread_count=10, exporter_mode=False, timeout=60, cost_per_1000_series=None):
     """ 
     Calculate the metric rates
     Args:
@@ -184,6 +257,7 @@ def get_metric_rates(metric_value_url, username, api_key, metric_names, metric_a
         quiet: If True, suppress progress output
         thread_count: Number of threads to use for processing (minimum: 1)
         exporter_mode: If True, calculate metrics for exporter mode
+        cost_per_1000_series: Optional float; if provided, compute and sort by estimated cost
     Returns:
         True if processing was successful, False otherwise
     """
@@ -275,12 +349,43 @@ def get_metric_rates(metric_value_url, username, api_key, metric_names, metric_a
         logger.info(f"Effective threads used: {min(thread_count, len(metric_chunks))}")
 
     metrics_above_threshold = 0
-    # Sort items by DPM value in descending order
-    sorted_dpm = sorted(dpm_data.items(), key=lambda x: float(x[1]), reverse=True)
+    # Prepare enriched entries with computed numeric fields
+    enriched = []
+    for metric_name, payload in dpm_data.items():
+        try:
+            dpm_val = float(payload.get('dpm', 0))
+        except Exception:
+            dpm_val = 0.0
+        try:
+            series_val = float(payload.get('series_count', 0))
+        except Exception:
+            series_val = 0.0
+        estimated_cost = None
+        if cost_per_1000_series is not None:
+            try:
+                # cost = (series / 1000) * cost_per_1000_series * DPM
+                estimated_cost = int(round((series_val / 1000.0) * float(cost_per_1000_series) * dpm_val))
+            except Exception:
+                estimated_cost = None
+        enriched.append({
+            'metric_name': metric_name,
+            'dpm': dpm_val,
+            'series_count': int(series_val),
+            'estimated_cost': estimated_cost
+        })
     
-    # Filter metrics above threshold
-    filtered_dpm = {metric_name: dpm for metric_name, dpm in sorted_dpm if float(dpm) > min_dpm}
-    metrics_above_threshold = len(filtered_dpm)
+    # Filter metrics above DPM threshold
+    enriched = [m for m in enriched if m['dpm'] > float(min_dpm)]
+    metrics_above_threshold = len(enriched)
+    
+    # Sort by estimated cost if provided; otherwise by DPM
+    if cost_per_1000_series is not None:
+        enriched.sort(key=lambda m: (m['estimated_cost'] if m['estimated_cost'] is not None else -1), reverse=True)
+    else:
+        enriched.sort(key=lambda m: m['dpm'], reverse=True)
+    
+    # Build dpm-only mapping for exporter compatibility
+    dpm_only = {m['metric_name']: str(m['dpm']) for m in enriched}
     
     if exporter_mode:
         # Update Prometheus metrics for exporter mode
@@ -291,7 +396,7 @@ def get_metric_rates(metric_value_url, username, api_key, metric_names, metric_a
             'processing_rate': len(filtered_metrics)/total_time if total_time > 0 else 0,
             'last_update': time.time()
         }
-        update_prometheus_metrics(filtered_dpm, performance_data)
+        update_prometheus_metrics(dpm_only, performance_data)
         if not quiet:
             logger.info(f"Updated exporter metrics: {metrics_above_threshold} metrics above threshold")
         return True
@@ -299,18 +404,28 @@ def get_metric_rates(metric_value_url, username, api_key, metric_names, metric_a
     if output_format == 'csv':
         with open("metric_rates.csv", "w", encoding="utf-8") as f:
             # Write CSV header
-            f.write("metric_name,dpm\n")
-            for metric_name, dpm in filtered_dpm.items():
+            if cost_per_1000_series is not None:
+                f.write("metric_name,dpm,series_count,estimated_cost\n")
+            else:
+                f.write("metric_name,dpm,series_count\n")
+            for item in enriched:
+                metric_name = item['metric_name']
+                dpm = item['dpm']
+                series_count = item['series_count']
+                estimated_cost = item['estimated_cost']
                 if not quiet:
-                    print(f"{metric_name},{dpm}")
-                f.write(f"{metric_name},{dpm}\n")
+                    if cost_per_1000_series is not None and estimated_cost is not None:
+                        print(f"{metric_name},{dpm},{series_count},{estimated_cost}")
+                    else:
+                        print(f"{metric_name},{dpm},{series_count}")
+                if cost_per_1000_series is not None and estimated_cost is not None:
+                    f.write(f"{metric_name},{dpm},{series_count},{estimated_cost}\n")
+                else:
+                    f.write(f"{metric_name},{dpm},{series_count}\n")
     elif output_format == 'json':
         import json
         output_data = {
-            "metrics": [
-                {"metric_name": metric_name, "dpm": float(dpm)}
-                for metric_name, dpm in filtered_dpm.items()
-            ],
+            "metrics": enriched,
             "total_metrics_above_threshold": metrics_above_threshold,
             "performance_metrics": {
                 "total_runtime_seconds": round(total_time, 2),
@@ -329,10 +444,24 @@ def get_metric_rates(metric_value_url, username, api_key, metric_names, metric_a
             # Add HELP and TYPE metadata for DPM metrics
             f.write("# HELP metric_dpm_rate Data points per minute for each metric\n")
             f.write("# TYPE metric_dpm_rate gauge\n")
-            for metric_name, dpm in filtered_dpm.items():
+            for item in enriched:
+                metric_name = item['metric_name']
+                dpm = item['dpm']
                 # Escape special characters in metric names as per Prometheus format
                 safe_metric_name = metric_name.replace('-', '_').replace('.', '_').replace(':', '_')
                 output_line = f'metric_dpm_rate{{metric_name="{safe_metric_name}"}} {dpm}\n'
+                if not quiet:
+                    print(output_line, end='')
+                f.write(output_line)
+            
+            # Add series count metric as well
+            f.write("\n# HELP metric_series_count Active series count for each metric\n")
+            f.write("# TYPE metric_series_count gauge\n")
+            for item in enriched:
+                metric_name = item['metric_name']
+                series_count = item['series_count']
+                safe_metric_name = metric_name.replace('-', '_').replace('.', '_').replace(':', '_')
+                output_line = f'metric_series_count{{metric_name="{safe_metric_name}"}} {series_count}\n'
                 if not quiet:
                     print(output_line, end='')
                 f.write(output_line)
@@ -357,10 +486,16 @@ def get_metric_rates(metric_value_url, username, api_key, metric_names, metric_a
         output_filename = "metric_rates.txt"
         with open(output_filename, "w", encoding="utf-8") as f:
             if not quiet:
-                print("\nMetrics and their DPM values:")
-            f.write("Metrics and their DPM values:\n")
-            for metric_name, dpm in filtered_dpm.items():
-                output_line = f"{metric_name}: {dpm}\n"
+                print("\nMetrics: DPM and cardinality (series count):")
+            f.write("Metrics: DPM and cardinality (series count):\n")
+            for item in enriched:
+                metric_name = item['metric_name']
+                dpm = item['dpm']
+                series_count = item['series_count']
+                if cost_per_1000_series is not None and item['estimated_cost'] is not None:
+                    output_line = f"{metric_name}: dpm={dpm}, series={series_count}, estimated_cost={item['estimated_cost']}\n"
+                else:
+                    output_line = f"{metric_name}: dpm={dpm}, series={series_count}\n"
                 if not quiet:
                     print(output_line, end='')
                 f.write(output_line)
@@ -600,6 +735,12 @@ def main():
         default=60,
         help='Request timeout in seconds for Prometheus API calls (default: 60)'
     )
+    parser.add_argument(
+        '--cost-per-1000-series',
+        type=float,
+        default=None,
+        help='Optional: Dollar cost per 1000 active series. If provided, output includes estimated_cost and is sorted by highest cost.'
+    )
     args = parser.parse_args()
 
     # Set logging level based on arguments
@@ -639,6 +780,8 @@ def main():
             logger.info("Running in one-time mode:")
             logger.info(f"- Output format: {args.format}")
         logger.info(f"- Minimum DPM threshold: {args.min_dpm}")
+        if args.cost_per_1000_series is not None:
+            logger.info(f"- Cost per 1000 series: {args.cost_per_1000_series}")
         logger.info(f"- Quiet mode: {args.quiet}")
         logger.info(f"- Verbose mode: {args.verbose}")
         logger.info(f"- Thread count: {args.threads}")
@@ -683,7 +826,8 @@ def main():
             min_dpm=args.min_dpm,
             quiet=args.quiet,
             thread_count=args.threads,
-            timeout=args.timeout
+            timeout=args.timeout,
+            cost_per_1000_series=args.cost_per_1000_series
         )
 
 if __name__ == "__main__":
