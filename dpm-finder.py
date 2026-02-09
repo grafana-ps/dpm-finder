@@ -8,6 +8,7 @@ import os
 import time
 import argparse
 import requests
+from requests import HTTPError
 import threading
 import logging
 import signal
@@ -195,8 +196,12 @@ def process_metric_chunk(chunk, metric_value_url, username, api_key, results_que
         )
         
         if isinstance(response_dpm, Exception):
-            if not quiet:
-                logger.error(f"Error processing metric {metric}: {str(response_dpm)}")
+            if isinstance(response_dpm, HTTPError) and response_dpm.response is not None and response_dpm.response.status_code == 422:
+                if not quiet:
+                    logger.warning(f"Skipping metric due to Prometheus 422: {metric}")
+            else:
+                if not quiet:
+                    logger.error(f"Error processing metric {metric}: {str(response_dpm)}")
             chunk_times.append(time.time() - metric_start_time)
             continue
             
@@ -223,7 +228,14 @@ def process_metric_chunk(chunk, metric_value_url, username, api_key, results_que
         )
         
         series_count_value = None
-        if not isinstance(response_series, Exception):
+        if isinstance(response_series, Exception):
+            if isinstance(response_series, HTTPError) and response_series.response is not None and response_series.response.status_code == 422:
+                if not quiet:
+                    logger.warning(f"Skipping series count due to Prometheus 422: {metric}")
+            else:
+                if not quiet:
+                    logger.error(f"Error processing series count for metric {metric}: {str(response_series)}")
+        else:
             try:
                 query_data_series = response_series.json().get("data", {}).get("result", [])
                 if query_data_series and len(query_data_series) > 0 and len(query_data_series[0].get('value', [])) > 1:
