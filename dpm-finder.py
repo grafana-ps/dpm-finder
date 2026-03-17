@@ -305,7 +305,7 @@ def get_metric_rates(metric_value_url, username, api_key, metric_names, metric_a
     # Filter metrics that don't end with _count, _bucket, _sum, don't begin with grafana_, and are not in aggregation rules
     filtered_metrics = [
         metric for metric in metric_names['data']
-        if not any(metric.endswith(suffix) for suffix in ['_count', '_bucket', '_sum'])
+        if not any(metric.endswith(suffix) for suffix in ['null'])
         and not metric.startswith('grafana_')
         and metric not in aggregated_metrics
     ]
