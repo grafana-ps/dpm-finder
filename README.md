@@ -4,13 +4,15 @@
 
 This repository contains a Python script designed to identify metrics in Prometheus that exceed a specified rate. It's particularly useful for detecting metrics with high data points per minute (DPM) rates, which can be indicative of issues or important trends.
 
-The script can run in two modes:
-- **One-time execution**: Calculate DPM and output results to files
-- **Prometheus exporter**: Run as a server that exposes DPM metrics for Prometheus scraping
+The script can run in two primary modes, with an **optional OTLP export** on top of either:
+
+- **One-time execution**: Calculate DPM and write results to files (CSV, JSON, text, or Prometheus exposition).
+- **Prometheus exporter**: Run as an HTTP server that exposes DPM metrics at `/metrics` for Prometheus to scrape.
+- **OTLP (optional)**: After each DPM run, push an OpenTelemetry gauge named `dpm` (label `metric_name`) to an OTLP/HTTP metrics endpoint. Use this with Grafana Cloud OTLP, Grafana Alloy, OpenTelemetry Collector, or any OTLP-compatible receiver. It does **not** replace the scrape exporter: you can use OTLP alone (one-time), OTLP + files, or **exporter + OTLP** so Prometheus scrapes `/metrics` while the same process also pushes to OTLP on each update cycle.
 
 ## Overview
 
-The `dpm-finder` script retrieves a list of all metrics from a Prometheus instance, calculates their data points per minute (DPM) rate using PromQL, and identifies metrics whose DPM exceeds a threshold. Results can be output to files or served via a Prometheus-compatible HTTP endpoint.
+The `dpm-finder` script retrieves a list of all metrics from a Prometheus instance, calculates their data points per minute (DPM) rate using PromQL, and identifies metrics whose DPM exceeds a threshold. Results can be written to files, served via a Prometheus-compatible HTTP endpoint (`prometheus_client` exporter), and/or exported over **OTLP/HTTP** when you set an OTLP endpoint.
 
 ## Functionality
 
@@ -26,6 +28,7 @@ The script does the following:
 5.  **Outputs results** in various formats:
     - **One-time mode**: CSV, JSON, text, or Prometheus exposition format files
     - **Exporter mode**: Live Prometheus metrics endpoint at `/metrics`
+    - **Optional OTLP**: After each successful DPM pass (one-time or each exporter refresh), sends the same “above threshold” series as OTLP metrics (gauge `dpm` with attribute/label `metric_name`)
 6.  **Provides detailed logging** with configurable verbosity levels for monitoring progress and debugging.
 
 ## How To
@@ -34,13 +37,19 @@ The script does the following:
 
 Please note the prometheus endpoint should not have anything after .net. 
 
-See .env_example 
+See `.env_example`.
 
 ```bash
 PROMETHEUS_ENDPOINT=""
 PROMETHEUS_USERNAME=""
 PROMETHEUS_API_KEY=""
+
+# Optional: OTLP/HTTP metrics export (gauge "dpm"; script appends /v1/metrics)
+# OTLP_ENDPOINT="http://localhost:4318"
+# OTLP_HEADERS="Authorization=Basic <base64>,Other-Header=value"
 ```
+
+CLI flags `--otlp-endpoint`, `--otlp-headers`, and `--otlp-timeout` override or supply these when set; otherwise `OTLP_ENDPOINT` / `OTLP_HEADERS` from the environment are used.
 
 ### 2. Install all libraries from requirements.txt
 
@@ -60,6 +69,13 @@ python3 -m pip install -r requirements.txt
 **Prometheus exporter mode:**
 ``` bash
 ./dpm-finder.py -e -p 9966
+```
+
+**With OTLP push** (works in one-time or exporter mode; requires OpenTelemetry packages in `requirements.txt`):
+
+```bash
+./dpm-finder.py -f csv --otlp-endpoint "http://localhost:4318"
+./dpm-finder.py -e -p 9966 --otlp-endpoint "https://your-otlp-host" --otlp-headers "Authorization=Bearer YOUR_TOKEN"
 ```
 
 ## Docker Usage
@@ -108,6 +124,16 @@ docker run -d \
   -e PROMETHEUS_USERNAME="${PROMETHEUS_USERNAME}" \
   -e PROMETHEUS_API_KEY="${PROMETHEUS_API_KEY}" \
   dpm-finder:latest --exporter --port 8080 --update-interval 43200 --min-dpm 5.0
+
+# Exporter with OTLP push (e.g. to Alloy on the host)
+docker run -d \
+  --name dpm-finder \
+  -p 9966:9966 \
+  -e PROMETHEUS_ENDPOINT="${PROMETHEUS_ENDPOINT}" \
+  -e PROMETHEUS_USERNAME="${PROMETHEUS_USERNAME}" \
+  -e PROMETHEUS_API_KEY="${PROMETHEUS_API_KEY}" \
+  -e OTLP_ENDPOINT="http://host.docker.internal:4318" \
+  dpm-finder:latest --exporter
 ```
 
 #### One-time Execution
@@ -336,6 +362,27 @@ docker inspect dpm-finder --format='{{.State.Health.Status}}'
 - **Signal handling**: Graceful shutdown on SIGTERM/SIGINT
 - **Optimized**: Python bytecode optimization enabled
 
+## OTLP export (optional)
+
+When `--otlp-endpoint` or `OTLP_ENDPOINT` is set, dpm-finder uses the OpenTelemetry SDK’s **OTLP/HTTP** metric exporter to send a single observable gauge:
+
+| Detail | Value |
+|--------|--------|
+| Metric name | `dpm` |
+| Series | One per metric **above** `--min-dpm` |
+| Labels / attributes | `metric_name` = Prometheus metric name |
+| Value | Computed DPM |
+
+**Endpoint:** Pass the OTLP **base** URL (e.g. `http://alloy-host:4318` for Alloy’s default OTLP HTTP port, or your Grafana Cloud OTLP gateway base). The script normalizes the URL (adds `https://` if no scheme is given) and posts to `{base}/v1/metrics`.
+
+**Auth:** Use `--otlp-headers` or `OTLP_HEADERS` as comma-separated `Key=Value` pairs (e.g. `Authorization=Basic …` or `Authorization=Bearer …`).
+
+**When it runs:** Once after a successful DPM calculation in **one-time** mode, and after **each** full calculation in **exporter** mode (initial run + every `--update-interval`).
+
+**Dependencies:** `opentelemetry-api`, `opentelemetry-sdk`, and `opentelemetry-exporter-otlp-proto-http` (listed in `requirements.txt`). If they are missing, OTLP export logs an error and skips.
+
+Prometheus does not scrape OTLP directly; see [Metrics not showing in Prometheus](#metrics-not-showing-in-prometheus) for how OTLP fits next to the scrape exporter.
+
 ## Prometheus Exporter Mode
 
 The script can run as a Prometheus exporter, serving metrics at an HTTP endpoint for Prometheus to scrape. In this mode:
@@ -365,9 +412,42 @@ Add this to your `prometheus.yml`:
 scrape_configs:
   - job_name: 'dpm-finder'
     static_configs:
-      - targets: ['localhost:9966']
+      - targets: ['localhost:9966']   # or your dpm-finder host:port
     scrape_interval: 1h  # Match or exceed your update interval
 ```
+
+**Important:** Prometheus only sees dpm-finder metrics if it actually scrapes this job. Ensure the `targets` host/port are reachable from the Prometheus server (use the hostname or IP Prometheus uses to reach the machine, not `localhost` if Prometheus runs on another host).
+
+### Metrics not showing in Prometheus
+
+**If you use exporter mode (dpm-finder with `-e`):**
+
+1. **Prometheus must scrape the target**  
+   Add the `dpm-finder` job to `prometheus.yml` (see above). Use the address Prometheus can reach (e.g. `host.docker.internal:9966` from Docker, or the host IP).
+
+2. **Check the exporter is up and serving**  
+   ```bash
+   curl -s http://localhost:9966/metrics | head -30
+   ```  
+   You should see `metric_dpm_rate`, `dpm_finder_runtime_seconds`, etc. If the list is empty or you get "connection refused", start dpm-finder with `-e -p 9966` and wait for the first run to finish.
+
+3. **Wait for the first scrape**  
+   Metrics appear only after the first DPM run completes. In exporter mode the default update interval is 1 day; use `-u 300` (5 minutes) for testing.
+
+**If you use OTLP push (`--otlp-endpoint`):**
+
+- dpm-finder pushes a gauge named **`dpm`** (label `metric_name`) to the OTLP URL. It does **not** expose a `/metrics` endpoint for Prometheus to scrape.
+- To see those in Prometheus you need either:
+  - **Grafana Cloud:** OTLP goes to the cloud OTLP gateway → metrics land in the Grafana Cloud Prometheus/Mimir data source. Query `dpm` (or the name Grafana gives it) in Explore.
+  - **Self-hosted Prometheus:** Run an OTLP receiver (e.g. Grafana Alloy or OpenTelemetry Collector) that receives OTLP and then either (a) exposes Prometheus metrics for scrape, or (b) remote-writes to Prometheus/Mimir. Without that bridge, Prometheus will not see OTLP-pushed metrics.
+
+**OTLP push not working?**
+
+1. Run with **`-v`** and check logs for lines like `OTLP export: sending N series to https://.../v1/metrics` and any `OTLP export: force_flush failed` or `failed to create exporter`.
+2. **Endpoint:** Use the OTLP **base** URL (e.g. `http://alloy-host:4318` for Alloy, or Grafana Cloud URL without `/v1/metrics`). The script appends `/v1/metrics`.
+3. **Alloy as receiver:** Alloy’s OTLP HTTP server listens on port **4318** by default. Point `--otlp-endpoint` (or `OTLP_ENDPOINT`) at that (e.g. `http://localhost:4318` if dpm-finder and Alloy run on the same host).
+4. **Grafana Cloud:** Use the gateway URL from the Cloud portal and set auth via `--otlp-headers "Authorization=Basic BASE64_USER_PASS"` or the header they provide. Ensure the token has OTLP write scope.
+5. **Network:** Ensure the host running dpm-finder can reach the endpoint (no firewall blocking outbound to that host/port).
 
 ## Logging and Verbosity
 
@@ -381,32 +461,37 @@ All log messages include timestamps and severity levels for better monitoring an
 
 ## Usage
 
+```
+usage: dpm-finder.py [-h] [-f {csv,text,txt,json,prom}] [-m MIN_DPM] [-q] [-v]
+                     [-t THREADS] [-e] [-p PORT] [-u UPDATE_INTERVAL]
+                     [--timeout TIMEOUT] [--cost-per-1000-series COST_PER_1000_SERIES]
+                     [--otlp-endpoint OTLP_ENDPOINT] [--otlp-headers OTLP_HEADERS]
+                     [--otlp-timeout OTLP_TIMEOUT]
 
-usage: dpm-finder.py [-h] [-f {csv,text,txt,json,prom}] [-m MIN_DPM] [-q] [-v] [-t THREADS] [-e] [-p PORT] [-u UPDATE_INTERVAL]
+DPM Finder - A tool to calculate Data Points per Minute (DPM) for Prometheus metrics.
+This script connects to a Prometheus instance, retrieves all metric names,
+calculates their DPM, and outputs results in CSV, JSON, text, or Prometheus exposition
+format, and/or serves them via an exporter and/or OTLP.
 
-
-        DPM Finder - A tool to calculate Data Points per Minute (DPM) for Prometheus metrics.
-        This script connects to a Prometheus instance, retrieves all metric names,
-        calculates their DPM, and outputs the results either in CSV or text format.
-        Results are filtered to show only metrics above a specified DPM threshold.
-        
-        This script is not intended to be run frequently.
+This script is not intended to be run frequently.
 
 optional arguments:
   -h, --help            Show this help message and exit
-  -f {csv,text,txt,json,prom}, --format {csv,text,txt,json,prom}
-                        Output format (default: csv). Note: "text" and "txt" are synonyms
-  -m MIN_DPM, --min-dpm MIN_DPM
-                        Minimum DPM threshold to show metrics (default: 1.0)
-  -q, --quiet           Suppress progress output and only write results to file
-  -v, --verbose         Enable debug logging for detailed output
-  -t THREADS, --threads THREADS
-                        Number of concurrent threads for processing metrics (minimum: 1, default: 10)
-
-  -e, --exporter        Run as a Prometheus exporter server instead of one-time execution
-  -p PORT, --port PORT   Port to run the exporter server on (default: 9966)
-  -u UPDATE_INTERVAL, --update-interval UPDATE_INTERVAL
-                         How often to update metrics in exporter mode, in seconds (default: 1 day or 86400 seconds)
+  -f, --format          Output format: csv, text, txt, json, prom (default: csv)
+  -m, --min-dpm         Minimum DPM threshold (default: 1.0)
+  -q, --quiet           Suppress most logging; errors and file output remain
+  -v, --verbose         Debug logging
+  -t, --threads         Concurrent worker threads (default: 10, minimum: 1)
+  -e, --exporter        Run as Prometheus scrape exporter (HTTP /metrics)
+  -p, --port            Exporter listen port (default: 9966)
+  -u, --update-interval Exporter: seconds between DPM refreshes (default: 86400)
+  --timeout             Prometheus API request timeout in seconds (default: 60)
+  --cost-per-1000-series
+                        Optional; adds estimated_cost column and sort by cost
+  --otlp-endpoint       OTLP/HTTP base URL for gauge "dpm" (env: OTLP_ENDPOINT)
+  --otlp-headers        OTLP request headers, key=value,... (env: OTLP_HEADERS)
+  --otlp-timeout        OTLP export timeout in seconds (default: 10)
+```
 
 ## Filtered Metrics
 
@@ -420,11 +505,15 @@ This filtering helps reduce noise and focuses analysis on core application and i
 
 ## Dependencies
 
-The script requires these Python packages (installed via requirements.txt):
+The script requires these Python packages (installed via `requirements.txt`):
 
 - `requests`: HTTP requests to Prometheus API
 - `python-dotenv`: Environment variable management
-- `prometheus_client`: Official Prometheus client library for exporter mode
+- `prometheus_client`: Prometheus scrape exporter (`/metrics`)
+
+For **OTLP export**, also install (included in `requirements.txt`):
+
+- `opentelemetry-api`, `opentelemetry-sdk`, `opentelemetry-exporter-otlp-proto-http`
 
 ## Usage Examples
 
@@ -451,6 +540,13 @@ The script requires these Python packages (installed via requirements.txt):
 # Custom port 
 ./dpm-finder.py -e -p 9090 
 
+# Exporter plus OTLP on each refresh cycle
+./dpm-finder.py -e -p 9966 --otlp-endpoint "http://alloy:4318"
+```
+
+### OTLP only (one-time run, no `/metrics` server)
+```bash
+./dpm-finder.py -f json --otlp-endpoint "https://otlp-gateway.example.com" --otlp-headers "Authorization=Bearer $TOKEN"
 ```
 
 
