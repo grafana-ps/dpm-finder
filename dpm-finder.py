@@ -19,6 +19,122 @@ from requests.auth import HTTPBasicAuth
 from dotenv import load_dotenv
 from prometheus_client import Gauge, Counter, Info, start_http_server, CollectorRegistry, REGISTRY
 
+# OTLP export (optional; import only when used to avoid hard dependency if not installed)
+def _export_dpm_to_otlp(enriched, endpoint, headers=None, quiet=False, timeout=10):
+    """
+    Export a single gauge metric 'dpm' to an OTLP endpoint.
+    Each time series has label metric_name and value = dpm (only metrics with dpm > threshold).
+    enriched: list of dicts with 'metric_name' and 'dpm' (already filtered above min_dpm).
+    endpoint: base URL e.g. https://otel.example.com or http://alloy:4318 (SDK appends /v1/metrics).
+    headers: optional list of (key, value) for auth e.g. [("Authorization", "Bearer <token>")].
+    """
+    if not enriched:
+        if not quiet:
+            logger.warning("OTLP export skipped: no metrics above threshold")
+        return True
+    try:
+        from opentelemetry import metrics
+        from opentelemetry.sdk.metrics import MeterProvider
+        from opentelemetry.sdk.metrics.export import PeriodicExportingMetricReader
+        from opentelemetry.sdk.resources import Resource
+        from opentelemetry.exporter.otlp.proto.http.metric_exporter import OTLPMetricExporter
+    except ImportError as e:
+        if not quiet:
+            logger.error("OTLP export requires opentelemetry packages: pip install opentelemetry-api opentelemetry-sdk opentelemetry-exporter-otlp-proto-http. %s", e)
+        return False
+
+    Observation = getattr(metrics, "Observation", None)
+    if Observation is None:
+        try:
+            from opentelemetry.metrics import Observation
+        except ImportError:
+            Observation = None
+    if Observation is None:
+        if not quiet:
+            logger.error("OTLP export: Observation not found in opentelemetry.metrics")
+        return False
+
+    # Base URL: no trailing slash
+    endpoint = endpoint.rstrip("/")
+    if not endpoint.startswith(("http://", "https://")):
+        endpoint = "https://" + endpoint
+    # Python SDK uses the given endpoint as-is (it does NOT append /v1/metrics when endpoint is provided)
+    metrics_url = endpoint + "/v1/metrics"
+    if not quiet:
+        logger.info("OTLP export: sending %d series to %s", len(enriched), metrics_url)
+
+    parsed_headers = None
+    if headers:
+        if isinstance(headers, (list, tuple)):
+            parsed_headers = list(headers)
+        elif isinstance(headers, str):
+            parsed_headers = []
+            for part in headers.split(","):
+                part = part.strip()
+                if "=" in part:
+                    k, v = part.split("=", 1)
+                    parsed_headers.append((k.strip(), v.strip()))
+        if not quiet and parsed_headers:
+            logger.debug("OTLP export: using %d header(s)", len(parsed_headers))
+
+    try:
+        exporter = OTLPMetricExporter(
+            endpoint=metrics_url,  # full URL: SDK does not append path when endpoint is provided
+            headers=parsed_headers,
+            timeout=timeout,
+        )
+    except Exception as e:
+        if not quiet:
+            logger.error("OTLP export: failed to create exporter: %s", e)
+        return False
+
+    reader = PeriodicExportingMetricReader(exporter, export_interval_millis=500)
+    resource = Resource.create({"service.name": "dpm-finder"})
+    provider = MeterProvider(resource=resource, metric_readers=[reader])
+    meter = provider.get_meter("dpm-finder", "1.0.0")
+
+    # ObservableGauge: yield one Observation per metric (metric_name attribute + dpm value)
+    def observe_dpm(options):
+        for m in enriched:
+            name = m.get("metric_name") or ""
+            val = m.get("dpm")
+            if val is None:
+                continue
+            try:
+                yield Observation(float(val), {"metric_name": name})
+            except Exception as e:
+                if not quiet:
+                    logger.debug("Skip OTLP observation for %s: %s", name, e)
+
+    meter.create_observable_gauge(
+        name="dpm",
+        description="Data points per minute for each metric above threshold",
+        callbacks=[observe_dpm],
+    )
+
+    export_ok = False
+    try:
+        # Wait for first reader cycle (collect + export); 500ms interval so 1.5s is safe
+        time.sleep(1.5)
+        provider.force_flush(timeout_millis=timeout * 1000)
+        export_ok = True
+    except Exception as e:
+        if not quiet:
+            logger.error("OTLP export: force_flush failed: %s", e)
+    try:
+        provider.shutdown()
+    except Exception as e:
+        if not quiet:
+            logger.warning("OTLP export: shutdown warning: %s", e)
+
+    if not quiet:
+        if export_ok:
+            logger.info("OTLP export: completed %d dpm series to %s", len(enriched), metrics_url)
+        else:
+            logger.warning("OTLP export: may have failed; check endpoint, auth, and network")
+    return export_ok
+
+
 # Set up module-level logger
 logger = logging.getLogger(__name__)
 
@@ -255,7 +371,7 @@ def process_metric_chunk(chunk, metric_value_url, username, api_key, results_que
     
     results_queue.put((chunk_results, chunk_times))
 
-def get_metric_rates(metric_value_url, username, api_key, metric_names, metric_aggregations, output_format='csv', min_dpm=1, quiet=False, thread_count=10, exporter_mode=False, timeout=60, cost_per_1000_series=None):
+def get_metric_rates(metric_value_url, username, api_key, metric_names, metric_aggregations, output_format='csv', min_dpm=1, quiet=False, thread_count=10, exporter_mode=False, timeout=60, cost_per_1000_series=None, otlp_endpoint=None, otlp_headers=None, otlp_timeout=10):
     """ 
     Calculate the metric rates
     Args:
@@ -270,6 +386,9 @@ def get_metric_rates(metric_value_url, username, api_key, metric_names, metric_a
         thread_count: Number of threads to use for processing (minimum: 1)
         exporter_mode: If True, calculate metrics for exporter mode
         cost_per_1000_series: Optional float; if provided, compute and sort by estimated cost
+        otlp_endpoint: Optional OTLP base URL; if set, export gauge 'dpm' (metrics above min_dpm) to this endpoint
+        otlp_headers: Optional headers for OTLP (e.g. auth): list of (k,v) or string "key=val,key2=val2"
+        otlp_timeout: Timeout in seconds for OTLP export
     Returns:
         True if processing was successful, False otherwise
     """
@@ -398,7 +517,11 @@ def get_metric_rates(metric_value_url, username, api_key, metric_names, metric_a
     
     # Build dpm-only mapping for exporter compatibility
     dpm_only = {m['metric_name']: str(m['dpm']) for m in enriched}
-    
+
+    # Optional: export single gauge 'dpm' to OTLP (only metrics above min_dpm, with label metric_name)
+    if otlp_endpoint and enriched:
+        _export_dpm_to_otlp(enriched, otlp_endpoint, headers=otlp_headers, quiet=quiet, timeout=otlp_timeout)
+
     if exporter_mode:
         # Update Prometheus metrics for exporter mode
         performance_data = {
@@ -411,8 +534,8 @@ def get_metric_rates(metric_value_url, username, api_key, metric_names, metric_a
         update_prometheus_metrics(dpm_only, performance_data)
         if not quiet:
             logger.info(f"Updated exporter metrics: {metrics_above_threshold} metrics above threshold")
-        return True
-    
+        # Fall through to write output files so metric_rates.csv etc. are written in exporter mode too
+
     if output_format == 'csv':
         with open("metric_rates.csv", "w", encoding="utf-8") as f:
             # Write CSV header
@@ -524,8 +647,9 @@ def get_metric_rates(metric_value_url, username, api_key, metric_names, metric_a
 
     return True
 
-def run_metrics_updater(metric_value_url, metric_name_url, metric_aggregation_url, username, api_key, 
-                       min_dpm, thread_count, update_interval, quiet, timeout=60):
+def run_metrics_updater(metric_value_url, metric_name_url, metric_aggregation_url, username, api_key,
+                        min_dpm, thread_count, update_interval, quiet, timeout=60,
+                        otlp_endpoint=None, otlp_headers=None, otlp_timeout=10):
     """
     Run periodic metrics updates for exporter mode
     """
@@ -551,7 +675,10 @@ def run_metrics_updater(metric_value_url, metric_name_url, metric_aggregation_ur
                     quiet=True,  # Always quiet for background updates
                     thread_count=thread_count,
                     exporter_mode=True,
-                    timeout=timeout
+                    timeout=timeout,
+                    otlp_endpoint=otlp_endpoint,
+                    otlp_headers=otlp_headers,
+                    otlp_timeout=otlp_timeout,
                 )
                 if success:
                     logger.debug("Metrics updated successfully")
@@ -576,7 +703,7 @@ def run_metrics_updater(metric_value_url, metric_name_url, metric_aggregation_ur
     logger.info("Metrics updater stopped")
 
 def run_exporter(port, metric_value_url, metric_name_url, metric_aggregation_url, username, api_key,
-                min_dpm, thread_count, update_interval, quiet, timeout=60):
+                min_dpm, thread_count, update_interval, quiet, timeout=60, otlp_endpoint=None, otlp_headers=None, otlp_timeout=10):
     """
     Run the Prometheus exporter server
     """
@@ -626,7 +753,10 @@ def run_exporter(port, metric_value_url, metric_name_url, metric_aggregation_url
                 quiet=quiet,
                 thread_count=thread_count,
                 exporter_mode=True,
-                timeout=timeout
+                timeout=timeout,
+                otlp_endpoint=otlp_endpoint,
+                otlp_headers=otlp_headers,
+                otlp_timeout=otlp_timeout,
             )
             if success:
                 logger.info("Initial metrics collection completed")
@@ -651,7 +781,7 @@ def run_exporter(port, metric_value_url, metric_name_url, metric_aggregation_url
     updater_thread = threading.Thread(
         target=run_metrics_updater,
         args=(metric_value_url, metric_name_url, metric_aggregation_url, username, api_key,
-              min_dpm, thread_count, update_interval, quiet, timeout),
+              min_dpm, thread_count, update_interval, quiet, timeout, otlp_endpoint, otlp_headers, otlp_timeout),
         daemon=True
     )
     updater_thread.start()
@@ -753,6 +883,24 @@ def main():
         default=None,
         help='Optional: Dollar cost per 1000 active series. If provided, output includes estimated_cost and is sorted by highest cost.'
     )
+    parser.add_argument(
+        '--otlp-endpoint',
+        type=str,
+        default=None,
+        help='OTLP base URL to export gauge "dpm" (only metrics above --min-dpm). Label: metric_name, value: dpm. Example: https://otel.example.com. Env: OTLP_ENDPOINT'
+    )
+    parser.add_argument(
+        '--otlp-headers',
+        type=str,
+        default=None,
+        help='Optional headers for OTLP (e.g. auth): key=value,key2=value2 or Authorization=Bearer <token>. Env: OTLP_HEADERS'
+    )
+    parser.add_argument(
+        '--otlp-timeout',
+        type=int,
+        default=10,
+        help='Timeout in seconds for OTLP export (default: 10)'
+    )
     args = parser.parse_args()
 
     # Set logging level based on arguments
@@ -799,10 +947,19 @@ def main():
         logger.info(f"- Thread count: {args.threads}")
         logger.info(f"- Request timeout: {args.timeout}s")
 
+    if args.otlp_timeout < 1:
+        logger.error(f"Invalid --otlp-timeout {args.otlp_timeout}, must be at least 1 second")
+        sys.exit(1)
+
     load_dotenv()
-    prometheus_endpoint=os.getenv("PROMETHEUS_ENDPOINT")
-    username=os.getenv("PROMETHEUS_USERNAME")
-    api_key=os.getenv("PROMETHEUS_API_KEY")
+    prometheus_endpoint = os.getenv("PROMETHEUS_ENDPOINT")
+    username = os.getenv("PROMETHEUS_USERNAME")
+    api_key = os.getenv("PROMETHEUS_API_KEY")
+    # OTLP: prefer CLI, fallback to env
+    otlp_endpoint = args.otlp_endpoint or os.getenv("OTLP_ENDPOINT")
+    otlp_headers = args.otlp_headers or os.getenv("OTLP_HEADERS")
+    if not args.quiet and otlp_endpoint:
+        logger.info("OTLP export: %s", otlp_endpoint)
 
     metric_value_url=f"{prometheus_endpoint}/api/prom/api/v1/query"
     metric_name_url=f"{prometheus_endpoint}/api/prom/api/v1/label/__name__/values"
@@ -824,7 +981,10 @@ def main():
             thread_count=args.threads,
             update_interval=args.update_interval,
             quiet=args.quiet,
-            timeout=args.timeout
+            timeout=args.timeout,
+            otlp_endpoint=otlp_endpoint,
+            otlp_headers=otlp_headers,
+            otlp_timeout=args.otlp_timeout,
         )
     else:
         # Run one-time execution
@@ -839,7 +999,10 @@ def main():
             quiet=args.quiet,
             thread_count=args.threads,
             timeout=args.timeout,
-            cost_per_1000_series=args.cost_per_1000_series
+            cost_per_1000_series=args.cost_per_1000_series,
+            otlp_endpoint=otlp_endpoint,
+            otlp_headers=otlp_headers,
+            otlp_timeout=args.otlp_timeout,
         )
 
 if __name__ == "__main__":
