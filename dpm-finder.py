@@ -131,7 +131,27 @@ def get_metric_json(url, username, api_key, quiet=False, timeout=60):
             logger.error(f"Error parsing metric names response: {str(e)}")
         return None
 
-def process_metric_chunk(chunk, metric_value_url, username, api_key, results_queue, quiet=False, show_labels=False, filter_labels=None, timeout=60):
+def normalize_filter_labels(filter_labels):
+    """Ensure label values in filter expressions are properly quoted for PromQL."""
+    parts = []
+    for part in filter_labels.split(','):
+        part = part.strip()
+        matched = False
+        for op in ['=~', '!~', '!=', '=']:
+            if op in part:
+                key, value = part.split(op, 1)
+                key = key.strip()
+                value = value.strip()
+                if not (value.startswith('"') and value.endswith('"')):
+                    value = f'"{value}"'
+                parts.append(f'{key}{op}{value}')
+                matched = True
+                break
+        if not matched:
+            parts.append(part)
+    return ','.join(parts)
+
+def process_metric_chunk(chunk, metric_value_url, username, api_key, results_queue, quiet=False, show_labels=False, filter_labels=None, timeout=60, window=5):
     """
     Process a chunk of metrics and put results in the queue
     """
@@ -146,10 +166,10 @@ def process_metric_chunk(chunk, metric_value_url, username, api_key, results_que
         # Build query with optional label filter
         base_query = f'{metric}{{__ignore_usage__=""'
         if filter_labels:
-            base_query += f',{filter_labels}'
+            base_query += f',{normalize_filter_labels(filter_labels)}'
         base_query += '}'
         
-        query = f'count_over_time({base_query}[5m])/5'
+        query = f'count_over_time({base_query}[{window}m])/{window}'
         response = make_request_with_retry(
             metric_value_url,
             auth=HTTPBasicAuth(username, api_key),
@@ -200,7 +220,7 @@ def process_metric_chunk(chunk, metric_value_url, username, api_key, results_que
     
     results_queue.put((chunk_results, chunk_times))
 
-def get_metric_rates(metric_value_url, username, api_key, metric_names, metric_aggregations, output_format='csv', min_dpm=1, quiet=False, thread_count=10, exporter_mode=False, show_labels=False, top_n=None, sort_by='dpm', filter_labels=None, timeout=60):
+def get_metric_rates(metric_value_url, username, api_key, metric_names, metric_aggregations, output_format='csv', min_dpm=1, quiet=False, thread_count=10, exporter_mode=False, show_labels=False, top_n=None, sort_by='dpm', filter_labels=None, timeout=60, window=5):
     """ 
     Calculate the metric rates
     Args:
@@ -279,7 +299,7 @@ def get_metric_rates(metric_value_url, username, api_key, metric_names, metric_a
     with ThreadPoolExecutor(max_workers=thread_count) as executor:
         # Submit tasks to the thread pool
         futures = [
-            executor.submit(process_metric_chunk, chunk, metric_value_url, username, api_key, results_queue, quiet, show_labels, filter_labels, timeout)
+            executor.submit(process_metric_chunk, chunk, metric_value_url, username, api_key, results_queue, quiet, show_labels, filter_labels, timeout, window)
             for chunk in metric_chunks
         ]
         
@@ -498,8 +518,8 @@ def get_metric_rates(metric_value_url, username, api_key, metric_names, metric_a
 
     return True
 
-def run_metrics_updater(metric_value_url, metric_name_url, metric_aggregation_url, username, api_key, 
-                       min_dpm, thread_count, update_interval, quiet, timeout=60):
+def run_metrics_updater(metric_value_url, metric_name_url, metric_aggregation_url, username, api_key,
+                       min_dpm, thread_count, update_interval, quiet, timeout=60, window=5):
     """
     Run periodic metrics updates for exporter mode
     """
@@ -525,7 +545,8 @@ def run_metrics_updater(metric_value_url, metric_name_url, metric_aggregation_ur
                     quiet=True,  # Always quiet for background updates
                     thread_count=thread_count,
                     exporter_mode=True,
-                    timeout=timeout
+                    timeout=timeout,
+                    window=window
                 )
                 if success:
                     logger.debug("Metrics updated successfully")
@@ -550,7 +571,7 @@ def run_metrics_updater(metric_value_url, metric_name_url, metric_aggregation_ur
     logger.info("Metrics updater stopped")
 
 def run_exporter(port, metric_value_url, metric_name_url, metric_aggregation_url, username, api_key,
-                min_dpm, thread_count, update_interval, quiet, timeout=60):
+                min_dpm, thread_count, update_interval, quiet, timeout=60, window=5):
     """
     Run the Prometheus exporter server
     """
@@ -568,7 +589,8 @@ def run_exporter(port, metric_value_url, metric_name_url, metric_aggregation_url
         'version': '1.0.0',
         'min_dpm_threshold': str(min_dpm),
         'update_interval_seconds': str(update_interval),
-        'thread_count': str(thread_count)
+        'thread_count': str(thread_count),
+        'window_minutes': str(window)
     })
     
     # Start HTTP server immediately using prometheus_client
@@ -625,7 +647,7 @@ def run_exporter(port, metric_value_url, metric_name_url, metric_aggregation_url
     updater_thread = threading.Thread(
         target=run_metrics_updater,
         args=(metric_value_url, metric_name_url, metric_aggregation_url, username, api_key,
-              min_dpm, thread_count, update_interval, quiet, timeout),
+              min_dpm, thread_count, update_interval, quiet, timeout, window),
         daemon=True
     )
     updater_thread.start()
@@ -739,6 +761,12 @@ def main():
         help='Filter metrics by label patterns (e.g., "job=my-app" or "env=~prod.*")'
     )
     parser.add_argument(
+        '-w', '--window',
+        type=int,
+        default=5,
+        help='Lookback window in minutes for DPM calculation (default: 5)'
+    )
+    parser.add_argument(
         '--timeout',
         type=int,
         default=60,
@@ -769,6 +797,11 @@ def main():
         logger.error(f"Invalid port {args.port}, must be between 1 and 65535")
         sys.exit(1)
     
+    # Validate window
+    if args.window < 1:
+        logger.error(f"Invalid window {args.window}, must be at least 1 minute")
+        sys.exit(1)
+
     # Validate timeout
     if args.timeout < 1:
         logger.error(f"Invalid timeout {args.timeout}, must be at least 1 second")
@@ -792,6 +825,7 @@ def main():
         logger.info(f"- Sort by: {args.sort_by}")
         if args.filter_labels:
             logger.info(f"- Label filter: {args.filter_labels}")
+        logger.info(f"- Lookback window: {args.window}m")
         logger.info(f"- Request timeout: {args.timeout}s")
 
     load_dotenv()
@@ -819,7 +853,8 @@ def main():
             thread_count=args.threads,
             update_interval=args.update_interval,
             quiet=args.quiet,
-            timeout=args.timeout
+            timeout=args.timeout,
+            window=args.window
         )
     else:
         # Run one-time execution
@@ -837,7 +872,8 @@ def main():
             top_n=args.top_n,
             sort_by=args.sort_by,
             filter_labels=args.filter_labels,
-            timeout=args.timeout
+            timeout=args.timeout,
+            window=args.window
         )
 
 if __name__ == "__main__":
