@@ -173,7 +173,7 @@ def get_metric_json(url, username, api_key, quiet=False, timeout=60):
             logger.error(f"Error parsing metric names response: {str(e)}")
         return None
 
-def process_metric_chunk(chunk, metric_value_url, username, api_key, results_queue, quiet=False, timeout=60):
+def process_metric_chunk(chunk, metric_value_url, username, api_key, results_queue, quiet=False, timeout=60, lookback=10, collect_series_detail=False):
     """
     Process a chunk of metrics and put results in the queue
     """
@@ -185,8 +185,8 @@ def process_metric_chunk(chunk, metric_value_url, username, api_key, results_que
         if not quiet:
             logger.debug(f"Processing metric: {metric}")
         
-        # DPM over last 5 minutes, per minute
-        query_dpm = 'count_over_time(%s{__ignore_usage__=""}[5m])/5' % (metric)
+        # DPM over lookback window, per minute
+        query_dpm = 'count_over_time(%s{__ignore_usage__=""}[%dm])/%d' % (metric, lookback, lookback)
         response_dpm = make_request_with_retry(
             metric_value_url,
             auth=HTTPBasicAuth(username, api_key),
@@ -207,14 +207,25 @@ def process_metric_chunk(chunk, metric_value_url, username, api_key, results_que
             
         try:
             query_data_dpm = response_dpm.json().get("data", {}).get("result", [])
-            if query_data_dpm and len(query_data_dpm) > 0 and len(query_data_dpm[0].get('value', [])) > 1:
-                dpm_value = query_data_dpm[0]['value'][1]
-            else:
-                dpm_value = None
+            dpm_value = None
+            series_detail = []
+            for series in query_data_dpm:
+                if len(series.get('value', [])) > 1:
+                    try:
+                        s_dpm = float(series['value'][1])
+                    except (ValueError, TypeError):
+                        continue
+                    if collect_series_detail:
+                        labels = {k: v for k, v in series.get('metric', {}).items()
+                                  if k != '__name__' and k != '__ignore_usage__'}
+                        series_detail.append({'labels': labels, 'dpm': s_dpm})
+                    if dpm_value is None or s_dpm > dpm_value:
+                        dpm_value = s_dpm
         except Exception as e:
             if not quiet:
                 logger.error(f"Error parsing response for metric {metric}: {str(e)}")
             dpm_value = None
+            series_detail = []
         
         # Series cardinality (active series count at evaluation time)
         # Keep the same selector pattern for consistency with DPM query
@@ -248,14 +259,15 @@ def process_metric_chunk(chunk, metric_value_url, username, api_key, results_que
         if dpm_value is not None:
             chunk_results[metric] = {
                 'dpm': dpm_value,
-                'series_count': series_count_value if series_count_value is not None else "0"
+                'series_count': series_count_value if series_count_value is not None else "0",
+                'series_detail': series_detail
             }
         
         chunk_times.append(time.time() - metric_start_time)
     
     results_queue.put((chunk_results, chunk_times))
 
-def get_metric_rates(metric_value_url, username, api_key, metric_names, metric_aggregations, output_format='csv', min_dpm=1, quiet=False, thread_count=10, exporter_mode=False, timeout=60, cost_per_1000_series=None):
+def get_metric_rates(metric_value_url, username, api_key, metric_names, metric_aggregations, output_format='csv', min_dpm=1, quiet=False, thread_count=10, exporter_mode=False, timeout=60, cost_per_1000_series=None, lookback=10):
     """ 
     Calculate the metric rates
     Args:
@@ -327,11 +339,14 @@ def get_metric_rates(metric_value_url, username, api_key, metric_names, metric_a
     if not quiet:
         logger.info(f"Processing {total_metrics} metrics in {len(metric_chunks)} chunks using {thread_count} threads")
     
+    # Only collect per-series detail for formats that use it
+    collect_series_detail = not exporter_mode and output_format in ('json', 'text', 'txt')
+
     # Create thread pool with the specified number of threads
     with ThreadPoolExecutor(max_workers=thread_count) as executor:
         # Submit tasks to the thread pool
         futures = [
-            executor.submit(process_metric_chunk, chunk, metric_value_url, username, api_key, results_queue, quiet, timeout)
+            executor.submit(process_metric_chunk, chunk, metric_value_url, username, api_key, results_queue, quiet, timeout, lookback, collect_series_detail)
             for chunk in metric_chunks
         ]
         
@@ -383,7 +398,8 @@ def get_metric_rates(metric_value_url, username, api_key, metric_names, metric_a
             'metric_name': metric_name,
             'dpm': dpm_val,
             'series_count': int(series_val),
-            'estimated_cost': estimated_cost
+            'estimated_cost': estimated_cost,
+            'series_detail': sorted(payload.get('series_detail', []), key=lambda x: x['dpm'], reverse=True)
         })
     
     # Filter metrics above DPM threshold
@@ -511,7 +527,14 @@ def get_metric_rates(metric_value_url, username, api_key, metric_names, metric_a
                 if not quiet:
                     print(output_line, end='')
                 f.write(output_line)
-            
+                # Per-series breakdown (pre-sorted by DPM descending)
+                for s in item.get('series_detail', []):
+                    label_str = ', '.join(f'{k}={v}' for k, v in s['labels'].items()) or '(no labels)'
+                    detail_line = f"  {label_str}: dpm={s['dpm']}\n"
+                    if not quiet:
+                        print(detail_line, end='')
+                    f.write(detail_line)
+
             # Add timing information to the text output
             f.write("\nPerformance Metrics:\n")
             f.write(f"Total runtime: {total_time:.2f} seconds\n")
@@ -524,8 +547,8 @@ def get_metric_rates(metric_value_url, username, api_key, metric_names, metric_a
 
     return True
 
-def run_metrics_updater(metric_value_url, metric_name_url, metric_aggregation_url, username, api_key, 
-                       min_dpm, thread_count, update_interval, quiet, timeout=60):
+def run_metrics_updater(metric_value_url, metric_name_url, metric_aggregation_url, username, api_key,
+                       min_dpm, thread_count, update_interval, quiet, timeout=60, lookback=10):
     """
     Run periodic metrics updates for exporter mode
     """
@@ -551,7 +574,8 @@ def run_metrics_updater(metric_value_url, metric_name_url, metric_aggregation_ur
                     quiet=True,  # Always quiet for background updates
                     thread_count=thread_count,
                     exporter_mode=True,
-                    timeout=timeout
+                    timeout=timeout,
+                    lookback=lookback
                 )
                 if success:
                     logger.debug("Metrics updated successfully")
@@ -576,7 +600,7 @@ def run_metrics_updater(metric_value_url, metric_name_url, metric_aggregation_ur
     logger.info("Metrics updater stopped")
 
 def run_exporter(port, metric_value_url, metric_name_url, metric_aggregation_url, username, api_key,
-                min_dpm, thread_count, update_interval, quiet, timeout=60):
+                min_dpm, thread_count, update_interval, quiet, timeout=60, lookback=10):
     """
     Run the Prometheus exporter server
     """
@@ -626,7 +650,8 @@ def run_exporter(port, metric_value_url, metric_name_url, metric_aggregation_url
                 quiet=quiet,
                 thread_count=thread_count,
                 exporter_mode=True,
-                timeout=timeout
+                timeout=timeout,
+                lookback=lookback
             )
             if success:
                 logger.info("Initial metrics collection completed")
@@ -651,7 +676,7 @@ def run_exporter(port, metric_value_url, metric_name_url, metric_aggregation_url
     updater_thread = threading.Thread(
         target=run_metrics_updater,
         args=(metric_value_url, metric_name_url, metric_aggregation_url, username, api_key,
-              min_dpm, thread_count, update_interval, quiet, timeout),
+              min_dpm, thread_count, update_interval, quiet, timeout, lookback),
         daemon=True
     )
     updater_thread.start()
@@ -748,6 +773,12 @@ def main():
         help='Request timeout in seconds for Prometheus API calls (default: 60)'
     )
     parser.add_argument(
+        '-l', '--lookback',
+        type=int,
+        default=10,
+        help='Lookback window in minutes for DPM calculation (default: 10)'
+    )
+    parser.add_argument(
         '--cost-per-1000-series',
         type=float,
         default=None,
@@ -783,6 +814,10 @@ def main():
         logger.error(f"Invalid timeout {args.timeout}, must be at least 1 second")
         sys.exit(1)
 
+    if args.lookback < 1:
+        logger.error(f"Invalid lookback {args.lookback}, must be at least 1 minute")
+        sys.exit(1)
+
     if not args.quiet:
         if args.exporter:
             logger.info("Running in exporter mode:")
@@ -798,6 +833,7 @@ def main():
         logger.info(f"- Verbose mode: {args.verbose}")
         logger.info(f"- Thread count: {args.threads}")
         logger.info(f"- Request timeout: {args.timeout}s")
+        logger.info(f"- Lookback window: {args.lookback}m")
 
     load_dotenv()
     prometheus_endpoint=os.getenv("PROMETHEUS_ENDPOINT")
@@ -824,7 +860,8 @@ def main():
             thread_count=args.threads,
             update_interval=args.update_interval,
             quiet=args.quiet,
-            timeout=args.timeout
+            timeout=args.timeout,
+            lookback=args.lookback
         )
     else:
         # Run one-time execution
@@ -839,7 +876,8 @@ def main():
             quiet=args.quiet,
             thread_count=args.threads,
             timeout=args.timeout,
-            cost_per_1000_series=args.cost_per_1000_series
+            cost_per_1000_series=args.cost_per_1000_series,
+            lookback=args.lookback
         )
 
 if __name__ == "__main__":
