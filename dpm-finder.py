@@ -394,7 +394,8 @@ def get_metric_rates(metric_value_url, username, api_key, metric_names, metric_a
             'metric_name': metric_name,
             'dpm': dpm_val,
             'series_count': int(series_val),
-            'estimated_cost': estimated_cost
+            'estimated_cost': estimated_cost,
+            'series_detail': payload.get('series_detail', [])
         })
     
     # Filter metrics above DPM threshold
@@ -522,7 +523,14 @@ def get_metric_rates(metric_value_url, username, api_key, metric_names, metric_a
                 if not quiet:
                     print(output_line, end='')
                 f.write(output_line)
-            
+                # Per-series breakdown
+                for s in item.get('series_detail', []):
+                    label_str = ', '.join(f'{k}={v}' for k, v in s['labels'].items())
+                    detail_line = f"  {label_str}: dpm={s['dpm']}\n"
+                    if not quiet:
+                        print(detail_line, end='')
+                    f.write(detail_line)
+
             # Add timing information to the text output
             f.write("\nPerformance Metrics:\n")
             f.write(f"Total runtime: {total_time:.2f} seconds\n")
