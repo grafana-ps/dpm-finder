@@ -173,7 +173,7 @@ def get_metric_json(url, username, api_key, quiet=False, timeout=60):
             logger.error(f"Error parsing metric names response: {str(e)}")
         return None
 
-def process_metric_chunk(chunk, metric_value_url, username, api_key, results_queue, quiet=False, timeout=60):
+def process_metric_chunk(chunk, metric_value_url, username, api_key, results_queue, quiet=False, timeout=60, lookback=10):
     """
     Process a chunk of metrics and put results in the queue
     """
@@ -255,7 +255,7 @@ def process_metric_chunk(chunk, metric_value_url, username, api_key, results_que
     
     results_queue.put((chunk_results, chunk_times))
 
-def get_metric_rates(metric_value_url, username, api_key, metric_names, metric_aggregations, output_format='csv', min_dpm=1, quiet=False, thread_count=10, exporter_mode=False, timeout=60, cost_per_1000_series=None):
+def get_metric_rates(metric_value_url, username, api_key, metric_names, metric_aggregations, output_format='csv', min_dpm=1, quiet=False, thread_count=10, exporter_mode=False, timeout=60, cost_per_1000_series=None, lookback=10):
     """ 
     Calculate the metric rates
     Args:
@@ -331,7 +331,7 @@ def get_metric_rates(metric_value_url, username, api_key, metric_names, metric_a
     with ThreadPoolExecutor(max_workers=thread_count) as executor:
         # Submit tasks to the thread pool
         futures = [
-            executor.submit(process_metric_chunk, chunk, metric_value_url, username, api_key, results_queue, quiet, timeout)
+            executor.submit(process_metric_chunk, chunk, metric_value_url, username, api_key, results_queue, quiet, timeout, lookback)
             for chunk in metric_chunks
         ]
         
@@ -524,8 +524,8 @@ def get_metric_rates(metric_value_url, username, api_key, metric_names, metric_a
 
     return True
 
-def run_metrics_updater(metric_value_url, metric_name_url, metric_aggregation_url, username, api_key, 
-                       min_dpm, thread_count, update_interval, quiet, timeout=60):
+def run_metrics_updater(metric_value_url, metric_name_url, metric_aggregation_url, username, api_key,
+                       min_dpm, thread_count, update_interval, quiet, timeout=60, lookback=10):
     """
     Run periodic metrics updates for exporter mode
     """
@@ -551,7 +551,8 @@ def run_metrics_updater(metric_value_url, metric_name_url, metric_aggregation_ur
                     quiet=True,  # Always quiet for background updates
                     thread_count=thread_count,
                     exporter_mode=True,
-                    timeout=timeout
+                    timeout=timeout,
+                    lookback=lookback
                 )
                 if success:
                     logger.debug("Metrics updated successfully")
@@ -576,7 +577,7 @@ def run_metrics_updater(metric_value_url, metric_name_url, metric_aggregation_ur
     logger.info("Metrics updater stopped")
 
 def run_exporter(port, metric_value_url, metric_name_url, metric_aggregation_url, username, api_key,
-                min_dpm, thread_count, update_interval, quiet, timeout=60):
+                min_dpm, thread_count, update_interval, quiet, timeout=60, lookback=10):
     """
     Run the Prometheus exporter server
     """
@@ -626,7 +627,8 @@ def run_exporter(port, metric_value_url, metric_name_url, metric_aggregation_url
                 quiet=quiet,
                 thread_count=thread_count,
                 exporter_mode=True,
-                timeout=timeout
+                timeout=timeout,
+                lookback=lookback
             )
             if success:
                 logger.info("Initial metrics collection completed")
@@ -651,7 +653,7 @@ def run_exporter(port, metric_value_url, metric_name_url, metric_aggregation_url
     updater_thread = threading.Thread(
         target=run_metrics_updater,
         args=(metric_value_url, metric_name_url, metric_aggregation_url, username, api_key,
-              min_dpm, thread_count, update_interval, quiet, timeout),
+              min_dpm, thread_count, update_interval, quiet, timeout, lookback),
         daemon=True
     )
     updater_thread.start()
@@ -748,6 +750,12 @@ def main():
         help='Request timeout in seconds for Prometheus API calls (default: 60)'
     )
     parser.add_argument(
+        '-l', '--lookback',
+        type=int,
+        default=10,
+        help='Lookback window in minutes for DPM calculation (default: 10)'
+    )
+    parser.add_argument(
         '--cost-per-1000-series',
         type=float,
         default=None,
@@ -783,6 +791,10 @@ def main():
         logger.error(f"Invalid timeout {args.timeout}, must be at least 1 second")
         sys.exit(1)
 
+    if args.lookback < 1:
+        logger.error(f"Invalid lookback {args.lookback}, must be at least 1 minute")
+        sys.exit(1)
+
     if not args.quiet:
         if args.exporter:
             logger.info("Running in exporter mode:")
@@ -798,6 +810,7 @@ def main():
         logger.info(f"- Verbose mode: {args.verbose}")
         logger.info(f"- Thread count: {args.threads}")
         logger.info(f"- Request timeout: {args.timeout}s")
+        logger.info(f"- Lookback window: {args.lookback}m")
 
     load_dotenv()
     prometheus_endpoint=os.getenv("PROMETHEUS_ENDPOINT")
@@ -824,7 +837,8 @@ def main():
             thread_count=args.threads,
             update_interval=args.update_interval,
             quiet=args.quiet,
-            timeout=args.timeout
+            timeout=args.timeout,
+            lookback=args.lookback
         )
     else:
         # Run one-time execution
@@ -839,7 +853,8 @@ def main():
             quiet=args.quiet,
             thread_count=args.threads,
             timeout=args.timeout,
-            cost_per_1000_series=args.cost_per_1000_series
+            cost_per_1000_series=args.cost_per_1000_series,
+            lookback=args.lookback
         )
 
 if __name__ == "__main__":
