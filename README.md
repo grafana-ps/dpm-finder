@@ -21,7 +21,7 @@ The script does the following:
     - Metrics ending with `_count`, `_bucket`, or `_sum` (histogram/summary components)
     - Metrics beginning with `grafana_` (Grafana internal metrics)
     - Metrics with aggregation rules defined in the cluster
-3.  **Calculates DPM rate** for each metric using a PromQL query: `count_over_time({metric_name}[5m])/5`.
+3.  **Calculates DPM rate** for each metric using a PromQL query: `count_over_time({metric_name}[Nm])/N` (where N is the configurable lookback window in minutes, default 10).
 4.  **Filters results** based on a DPM threshold (metrics with DPM > 1 by default).
 5.  **Outputs results** in various formats:
     - **One-time mode**: CSV, JSON, text, or Prometheus exposition format files
@@ -382,7 +382,7 @@ All log messages include timestamps and severity levels for better monitoring an
 ## Usage
 
 
-usage: dpm-finder.py [-h] [-f {csv,text,txt,json,prom}] [-m MIN_DPM] [-q] [-v] [-t THREADS] [-e] [-p PORT] [-u UPDATE_INTERVAL]
+usage: dpm-finder.py [-h] [-f {csv,text,txt,json,prom}] [-m MIN_DPM] [-q] [-v] [-t THREADS] [-e] [-p PORT] [-u UPDATE_INTERVAL] [--timeout TIMEOUT] [-l LOOKBACK] [--cost-per-1000-series COST]
 
 
         DPM Finder - A tool to calculate Data Points per Minute (DPM) for Prometheus metrics.
@@ -402,11 +402,17 @@ optional arguments:
   -v, --verbose         Enable debug logging for detailed output
   -t THREADS, --threads THREADS
                         Number of concurrent threads for processing metrics (minimum: 1, default: 10)
-
+  -l LOOKBACK, --lookback LOOKBACK
+                        Lookback window in minutes for DPM calculation (default: 10). Larger values
+                        improve accuracy for push-based/OTel metrics with irregular intervals.
   -e, --exporter        Run as a Prometheus exporter server instead of one-time execution
   -p PORT, --port PORT   Port to run the exporter server on (default: 9966)
   -u UPDATE_INTERVAL, --update-interval UPDATE_INTERVAL
                          How often to update metrics in exporter mode, in seconds (default: 1 day or 86400 seconds)
+  --timeout TIMEOUT     Request timeout in seconds for Prometheus API calls (default: 60)
+  --cost-per-1000-series COST
+                        Dollar cost per 1000 active series. If provided, output includes estimated_cost
+                        and is sorted by highest cost.
 
 ## Filtered Metrics
 
