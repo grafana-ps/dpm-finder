@@ -173,7 +173,7 @@ def get_metric_json(url, username, api_key, quiet=False, timeout=60):
             logger.error(f"Error parsing metric names response: {str(e)}")
         return None
 
-def process_metric_chunk(chunk, metric_value_url, username, api_key, results_queue, quiet=False, timeout=60, lookback=10):
+def process_metric_chunk(chunk, metric_value_url, username, api_key, results_queue, quiet=False, timeout=60, lookback=10, collect_series_detail=False):
     """
     Process a chunk of metrics and put results in the queue
     """
@@ -215,9 +215,10 @@ def process_metric_chunk(chunk, metric_value_url, username, api_key, results_que
                         s_dpm = float(series['value'][1])
                     except (ValueError, TypeError):
                         continue
-                    labels = {k: v for k, v in series.get('metric', {}).items()
-                              if k != '__name__' and k != '__ignore_usage__'}
-                    series_detail.append({'labels': labels, 'dpm': s_dpm})
+                    if collect_series_detail:
+                        labels = {k: v for k, v in series.get('metric', {}).items()
+                                  if k != '__name__' and k != '__ignore_usage__'}
+                        series_detail.append({'labels': labels, 'dpm': s_dpm})
                     if dpm_value is None or s_dpm > dpm_value:
                         dpm_value = s_dpm
         except Exception as e:
@@ -338,11 +339,14 @@ def get_metric_rates(metric_value_url, username, api_key, metric_names, metric_a
     if not quiet:
         logger.info(f"Processing {total_metrics} metrics in {len(metric_chunks)} chunks using {thread_count} threads")
     
+    # Only collect per-series detail for formats that use it
+    collect_series_detail = not exporter_mode and output_format in ('json', 'text', 'txt')
+
     # Create thread pool with the specified number of threads
     with ThreadPoolExecutor(max_workers=thread_count) as executor:
         # Submit tasks to the thread pool
         futures = [
-            executor.submit(process_metric_chunk, chunk, metric_value_url, username, api_key, results_queue, quiet, timeout, lookback)
+            executor.submit(process_metric_chunk, chunk, metric_value_url, username, api_key, results_queue, quiet, timeout, lookback, collect_series_detail)
             for chunk in metric_chunks
         ]
         
@@ -395,7 +399,7 @@ def get_metric_rates(metric_value_url, username, api_key, metric_names, metric_a
             'dpm': dpm_val,
             'series_count': int(series_val),
             'estimated_cost': estimated_cost,
-            'series_detail': payload.get('series_detail', [])
+            'series_detail': sorted(payload.get('series_detail', []), key=lambda x: x['dpm'], reverse=True)
         })
     
     # Filter metrics above DPM threshold
@@ -523,9 +527,9 @@ def get_metric_rates(metric_value_url, username, api_key, metric_names, metric_a
                 if not quiet:
                     print(output_line, end='')
                 f.write(output_line)
-                # Per-series breakdown
+                # Per-series breakdown (pre-sorted by DPM descending)
                 for s in item.get('series_detail', []):
-                    label_str = ', '.join(f'{k}={v}' for k, v in s['labels'].items())
+                    label_str = ', '.join(f'{k}={v}' for k, v in s['labels'].items()) or '(no labels)'
                     detail_line = f"  {label_str}: dpm={s['dpm']}\n"
                     if not quiet:
                         print(detail_line, end='')
