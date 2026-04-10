@@ -185,8 +185,8 @@ def process_metric_chunk(chunk, metric_value_url, username, api_key, results_que
         if not quiet:
             logger.debug(f"Processing metric: {metric}")
         
-        # DPM over last 5 minutes, per minute
-        query_dpm = 'count_over_time(%s{__ignore_usage__=""}[5m])/5' % (metric)
+        # DPM over lookback window, per minute
+        query_dpm = 'count_over_time(%s{__ignore_usage__=""}[%dm])/%d' % (metric, lookback, lookback)
         response_dpm = make_request_with_retry(
             metric_value_url,
             auth=HTTPBasicAuth(username, api_key),
@@ -207,14 +207,24 @@ def process_metric_chunk(chunk, metric_value_url, username, api_key, results_que
             
         try:
             query_data_dpm = response_dpm.json().get("data", {}).get("result", [])
-            if query_data_dpm and len(query_data_dpm) > 0 and len(query_data_dpm[0].get('value', [])) > 1:
-                dpm_value = query_data_dpm[0]['value'][1]
-            else:
-                dpm_value = None
+            dpm_value = None
+            series_detail = []
+            for series in query_data_dpm:
+                if len(series.get('value', [])) > 1:
+                    try:
+                        s_dpm = float(series['value'][1])
+                    except (ValueError, TypeError):
+                        continue
+                    labels = {k: v for k, v in series.get('metric', {}).items()
+                              if k != '__name__' and k != '__ignore_usage__'}
+                    series_detail.append({'labels': labels, 'dpm': s_dpm})
+                    if dpm_value is None or s_dpm > dpm_value:
+                        dpm_value = s_dpm
         except Exception as e:
             if not quiet:
                 logger.error(f"Error parsing response for metric {metric}: {str(e)}")
             dpm_value = None
+            series_detail = []
         
         # Series cardinality (active series count at evaluation time)
         # Keep the same selector pattern for consistency with DPM query
@@ -248,7 +258,8 @@ def process_metric_chunk(chunk, metric_value_url, username, api_key, results_que
         if dpm_value is not None:
             chunk_results[metric] = {
                 'dpm': dpm_value,
-                'series_count': series_count_value if series_count_value is not None else "0"
+                'series_count': series_count_value if series_count_value is not None else "0",
+                'series_detail': series_detail
             }
         
         chunk_times.append(time.time() - metric_start_time)
