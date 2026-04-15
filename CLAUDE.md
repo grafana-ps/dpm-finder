@@ -80,14 +80,19 @@ Extract `cluster_slug` for the endpoint URL and `id` for the username.
 
 ## Output Formats
 
+Output files are written to the current working directory.
+
 ### JSON (`-f json`) -> `metric_rates.json`
 Best for programmatic analysis. Includes per-series DPM breakdown:
 - `metrics[].metric_name` -- the metric name
-- `metrics[].dpm` -- data points per minute (max across all series)
+- `metrics[].dpm` -- data points per minute (maximum across this metric's individual series)
 - `metrics[].series_count` -- number of active time series
 - `metrics[].series_detail[]` -- per-label-set DPM breakdown (sorted by DPM descending)
-- `total_metrics` -- count of metrics above threshold
-- Performance timing statistics
+- `total_metrics_above_threshold` -- count of metrics above threshold
+- `performance_metrics.total_runtime_seconds` -- total processing time
+- `performance_metrics.average_metric_processing_seconds` -- avg time per metric
+- `performance_metrics.total_metrics_processed` -- total metrics analyzed
+- `performance_metrics.metrics_per_second` -- processing throughput
 
 ### CSV (`-f csv`) -> `metric_rates.csv`
 Columns: `metric_name`, `dpm`, `series_count` (plus `estimated_cost` if `--cost-per-1000-series` is set).
@@ -100,7 +105,7 @@ Prometheus exposition format suitable for Alloy's `prometheus.exporter.unix` tex
 
 ## Interpreting Results
 
-- **DPM** = data points per minute across all series for a metric (takes the max across series)
+- **DPM** = data points per minute (maximum across this metric's individual series)
 - **series_count** = number of active time series for that metric
 - **series_detail** (JSON/text only) = per-label-combination DPM breakdown
 - Sort by DPM descending to find the noisiest metrics
