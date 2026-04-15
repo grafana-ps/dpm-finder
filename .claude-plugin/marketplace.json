@@ -1,0 +1,13 @@
+{
+  "name": "grafana-ps-dpm-finder",
+  "owner": {
+    "name": "Grafana Professional Services"
+  },
+  "plugins": [
+    {
+      "name": "grafana-dpm-finder",
+      "source": "./grafana-dpm-finder",
+      "description": "Analyze Prometheus metric DPM rates to identify cost drivers in Grafana Cloud"
+    }
+  ]
+}

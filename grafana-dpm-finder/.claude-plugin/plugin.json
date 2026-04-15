@@ -1,0 +1,8 @@
+{
+  "name": "grafana-dpm-finder",
+  "version": "1.0.0",
+  "description": "Analyze Prometheus metric DPM rates with per-series breakdown to identify cost drivers in Grafana Cloud. Supports gcx-based stack discovery and automatic environment setup.",
+  "author": {
+    "name": "Grafana PS Team (Rob Knight)"
+  }
+}

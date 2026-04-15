@@ -1,0 +1,29 @@
+{
+  "name": "dpm-finder",
+  "description": "Analyzes Prometheus metric DPM (Data Points per Minute) rates to identify cost drivers in Grafana Cloud. Provides metric-level granularity with per-label breakdown.",
+  "url": "https://github.com/grafana-ps/dpm-finder",
+  "version": "1.0.0",
+  "provider": {
+    "organization": "Grafana Professional Services",
+    "url": "https://grafana.com"
+  },
+  "capabilities": {
+    "streaming": false,
+    "pushNotifications": false
+  },
+  "defaultInputModes": ["text/plain"],
+  "defaultOutputModes": ["application/json", "text/csv", "text/plain"],
+  "skills": [
+    {
+      "id": "analyze-dpm",
+      "name": "DPM Analysis",
+      "description": "Calculate per-metric DPM rates from a Prometheus endpoint, filtered by threshold, with per-series label breakdown",
+      "tags": ["prometheus", "metrics", "dpm", "grafana-cloud", "cost-optimization"],
+      "examples": [
+        "Analyze DPM for my-production-stack",
+        "Find metrics with DPM above 10",
+        "Show per-label breakdown for high-DPM metrics"
+      ]
+    }
+  ]
+}
