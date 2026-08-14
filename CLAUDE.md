@@ -58,9 +58,13 @@ Extract `cluster_slug` for the endpoint URL and `id` for the username.
 
 ### One-Shot Analysis (primary use case)
 
+Obtain $/1000 active series from the org's **FOCUS** cost dataset (stack-level Cost Management and Billing → Invoices → FOCUS download, or the [FOCUS API](https://grafana.com/docs/grafana-cloud/platform/cost-management-and-billing/focus/focus-api-usage/)). Prefer Metrics `ContractedUnitPrice`, else `ListUnitPrice`. See [FOCUS docs](https://grafana.com/docs/grafana-cloud/platform/cost-management-and-billing/focus/). Then:
+
 ```bash
-./dpm-finder.py -f json -m 2.0 -t 8 --timeout 120 -l 10
+./dpm-finder.py -f json -m 2.0 -t 8 --timeout 120 -l 10 --cost-per-1000-series 6.50
 ```
+
+Replace `6.50` with the FOCUS-derived rate. Without the flag, results sort by DPM only.
 
 ### CLI Flags Reference
 
@@ -71,7 +75,7 @@ Extract `cluster_slug` for the endpoint URL and `id` for the username.
 | `-t`, `--threads` | `10` | Concurrent processing threads |
 | `-l`, `--lookback` | `10` | Lookback window in minutes for DPM calculation |
 | `--timeout` | `60` | API request timeout in seconds |
-| `--cost-per-1000-series` | _(none)_ | Dollar cost per 1000 series; adds estimated_cost column |
+| `--cost-per-1000-series` | _(none)_ | $/1000 active series; adds `estimated_cost` = `(series/1000)*rate*dpm` and sorts by highest cost. Get rate from FOCUS Metrics `ContractedUnitPrice` / `ListUnitPrice` |
 | `-q`, `--quiet` | `false` | Suppress progress output |
 | `-v`, `--verbose` | `false` | Enable debug logging |
 | `-e`, `--exporter` | `false` | Run as Prometheus exporter instead of one-shot |
@@ -83,10 +87,12 @@ Extract `cluster_slug` for the endpoint URL and `id` for the username.
 Output files are written to the current working directory.
 
 ### JSON (`-f json`) -> `metric_rates.json`
-Best for programmatic analysis. Includes per-series DPM breakdown:
+Best for programmatic analysis. Includes per-series DPM breakdown and a top-level `interpretation` object:
+- `interpretation` -- field meanings, sort order, prioritization, cost-rate source, link to README Interpreting Results
 - `metrics[].metric_name` -- the metric name
 - `metrics[].dpm` -- data points per minute (maximum across this metric's individual series)
 - `metrics[].series_count` -- number of active time series
+- `metrics[].estimated_cost` -- relative cost when `--cost-per-1000-series` is set; otherwise null
 - `metrics[].series_detail[]` -- per-label-set DPM breakdown (sorted by DPM descending)
 - `total_metrics_above_threshold` -- count of metrics above threshold
 - `performance_metrics.total_runtime_seconds` -- total processing time
@@ -95,22 +101,31 @@ Best for programmatic analysis. Includes per-series DPM breakdown:
 - `performance_metrics.metrics_per_second` -- processing throughput
 
 ### CSV (`-f csv`) -> `metric_rates.csv`
-Columns: `metric_name`, `dpm`, `series_count` (plus `estimated_cost` if `--cost-per-1000-series` is set).
+Columns: `metric_name`, `dpm`, `series_count` (plus `estimated_cost` if `--cost-per-1000-series` is set). File starts with `#` comment lines describing how to interpret results (stdout prints data rows only).
 
 ### Text (`-f text`) -> `metric_rates.txt`
-Human-readable format with per-series breakdown and performance statistics.
+Human-readable format with interpretation preamble, per-series breakdown, and performance statistics.
 
 ### Prometheus (`-f prom`) -> `metric_rates.prom`
-Prometheus exposition format suitable for Alloy's `prometheus.exporter.unix` textfile collector.
+Prometheus exposition format suitable for Alloy's `prometheus.exporter.unix` textfile collector. Includes `#` interpretation comments (scrapers ignore them). Does not emit `estimated_cost` as a metric.
 
 ## Interpreting Results
 
+DPM alone is a weak signal. Use **DPM together with `series_count`** to decide whether a metric is worth remediating.
+
 - **DPM** = data points per minute (maximum across this metric's individual series)
-- **series_count** = number of active time series for that metric
+- **series_count** = number of active time series (cardinality) for that metric
+- **estimated_cost** = `(series_count / 1000) * cost_per_1000_series * dpm` when `--cost-per-1000-series` is set
 - **series_detail** (JSON/text only) = per-label-combination DPM breakdown
-- Sort by DPM descending to find the noisiest metrics
-- For top metrics, examine `series_detail` to identify which label combinations drive the highest DPM
-- If `--cost-per-1000-series` is set, use `estimated_cost` to prioritize by spend
+
+### Cost-aware analysis (recommended)
+
+1. Pass `--cost-per-1000-series` with the Metrics unit price from the org's **FOCUS** dataset (CMAB Invoices download or FOCUS API). Prefer `ContractedUnitPrice`, else `ListUnitPrice`. List price on grafana.com/pricing is only a last-resort fallback.
+2. Output includes `estimated_cost` and is **sorted by highest cost first**.
+3. Focus remediation on the highest `estimated_cost` metrics (roughly the top ~10% by spend). Deprioritize the long-tail (~bottom 90% by cost) unless a metric is an obvious outlier.
+4. For top metrics, examine `series_detail` to identify which label combinations drive the highest DPM.
+
+When cost is not provided, results are sorted by DPM descending. CSV, JSON, text, and prom embed interpretation notes linking to README.md#interpreting-results.
 
 ## Rate Limiting
 

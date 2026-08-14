@@ -68,13 +68,23 @@ If venv exists, activate it:
 source {repo_root}/venv/bin/activate
 ```
 
-## Step 4: Run DPM Analysis
+## Step 4: Obtain Cost Rate and Run Analysis
 
-Execute the tool with JSON output for structured parsing:
+Before running, ask the user for the **dollar cost per 1000 active series** from their org's **FOCUS** cost dataset (stack/org Cost Management and Billing):
+
+1. Grafana Cloud stack → **Cost Management and Billing → Invoices → FOCUS download**, or the [FOCUS API](https://grafana.com/docs/grafana-cloud/platform/cost-management-and-billing/focus/focus-api-usage/)
+2. In the FOCUS CSV, use Metrics **`ContractedUnitPrice`** (preferred) or **`ListUnitPrice`** for `--cost-per-1000-series` (confirm `PricingUnit` is per 1000 series)
+3. Overview: [FOCUS docs](https://grafana.com/docs/grafana-cloud/platform/cost-management-and-billing/focus/)
+
+Public list price on grafana.com/pricing is only a last-resort estimate if FOCUS is unavailable.
+
+Execute the tool with JSON output and cost estimation:
 
 ```bash
-cd {repo_root} && source venv/bin/activate && python3 dpm-finder.py -f json -m 2.0 -t 8 --timeout 120 -l 10
+cd {repo_root} && source venv/bin/activate && python3 dpm-finder.py -f json -m 2.0 -t 8 --timeout 120 -l 10 --cost-per-1000-series <RATE>
 ```
+
+Replace `<RATE>` with the value the user provided. If they decline to supply a rate, run without the flag and note that results will sort by DPM only.
 
 If the user provided custom flags or thresholds, adjust accordingly. See CLAUDE.md for the full CLI flags reference.
 
@@ -85,19 +95,21 @@ Monitor the output for errors:
 
 ## Step 5: Present Results
 
-Read and parse `{repo_root}/metric_rates.json`:
+Read and parse `{repo_root}/metric_rates.json`. Prefer the top-level `interpretation` object when summarizing how to read the results for the user.
 
-1. Present a summary table sorted by DPM descending:
+1. Present a summary table. When `estimated_cost` is present, the file is already sorted by cost descending — keep that order. Otherwise sort/present by DPM descending:
 
 | Metric | DPM | Active Series | Est. Cost |
 |--------|-----|---------------|-----------|
 | metric_name | value | count | cost_if_available |
 
-2. For the **top 5 metrics** by DPM, show the per-series breakdown:
+2. Recommend action on the **costliest metrics** (roughly top ~10% by `estimated_cost`). Deprioritize the long-tail (~bottom 90% by cost) unless a metric is an obvious outlier. When cost is unavailable, use high DPM + high `series_count` together.
+
+3. For the **top 5 metrics** by `estimated_cost` (fallback: DPM), show the per-series breakdown:
    - List the label combinations driving the highest DPM
    - Use `series_detail` from the JSON output
 
-3. Include totals:
+4. Include totals:
    - Total metrics above threshold
    - Processing time from performance stats
 

@@ -52,15 +52,52 @@ python3 -m pip install -r requirements.txt
 
 ### 3. Run the script
 
-**One-time execution (traditional mode):**
-``` bash
-./dpm-finder.py -t 4 -f csv 
+**One-time execution (recommended: cost-aware):**
+
+Obtain your org's **$/1000 active series** from FOCUS cost data (available on the Grafana Cloud stack / org):
+
+1. In the stack: **Cost Management and Billing → Invoices → FOCUS download** for the billing period ([CMAB docs](https://grafana.com/docs/grafana-cloud/platform/cost-management-and-billing/focus/focus-cmab-app-usage/)), **or**
+2. Via the [FOCUS API](https://grafana.com/docs/grafana-cloud/platform/cost-management-and-billing/focus/focus-api-usage/) (`org-billing-focus:read` token).
+3. In the FOCUS CSV, find **Metrics** rows and use **`ContractedUnitPrice`** (preferred) or **`ListUnitPrice`** as `--cost-per-1000-series`. Confirm `PricingUnit` matches per-1000-series billing (convert if your export uses a different unit).
+
+See [FOCUS overview](https://grafana.com/docs/grafana-cloud/platform/cost-management-and-billing/focus/). Public list price on [grafana.com/pricing](https://grafana.com/pricing/) is only a last-resort estimate.
+
+```bash
+./dpm-finder.py -f json -m 2.0 -t 8 --timeout 120 -l 10 --cost-per-1000-series 6.50
 ```
 
+Replace `6.50` with the rate from FOCUS. Without `--cost-per-1000-series`, results sort by DPM only.
+
 **Prometheus exporter mode:**
-``` bash
+```bash
 ./dpm-finder.py -e -p 9966
 ```
+
+## Interpreting Results
+
+DPM alone is a weak signal. Use **DPM together with `series_count` (cardinality)** to decide whether a metric is worth remediating. High DPM with few series may be noise; moderate DPM with many series often drives spend.
+
+### Fields
+
+| Field | Meaning |
+|-------|---------|
+| `dpm` | Data points per minute (maximum across this metric's individual series) |
+| `series_count` | Number of active time series (cardinality) for that metric |
+| `estimated_cost` | Relative cost estimate: `(series_count / 1000) * cost_per_1000_series * dpm` (only when `--cost-per-1000-series` is set) |
+| `series_detail` | Per-label-combination DPM breakdown (JSON/text only) |
+
+### Cost-aware analysis (recommended)
+
+1. Pass `--cost-per-1000-series` with the Metrics unit price from your org's **FOCUS** dataset (Cost Management and Billing → Invoices → FOCUS download, or the [FOCUS API](https://grafana.com/docs/grafana-cloud/platform/cost-management-and-billing/focus/focus-api-usage/)). Prefer `ContractedUnitPrice`, else `ListUnitPrice`. Public list price is only a last-resort estimate.
+2. Output includes `estimated_cost` and is **sorted by highest cost first**.
+3. Focus remediation on the **highest `estimated_cost` metrics** (roughly the top ~10% by spend). Deprioritize the long-tail (~bottom 90% by cost) unless a metric is an obvious outlier.
+4. For top metrics, examine `series_detail` to see which label combinations drive the highest DPM.
+
+When cost is not provided, results are sorted by DPM descending (noisiest first).
+
+### Self-describing output
+
+All one-shot output files (CSV, JSON, text, and prom) embed interpretation notes (field meanings, sort order, prioritization, cost-rate source) and link back to this section so shared artifacts remain understandable on their own. Prometheus exposition uses `#` comment lines (ignored by scrapers); estimated_cost is not emitted as a prom metric — use csv/json/text with `--cost-per-1000-series` for cost ranking.
 
 ## Docker Usage
 
@@ -411,8 +448,8 @@ optional arguments:
                          How often to update metrics in exporter mode, in seconds (default: 1 day or 86400 seconds)
   --timeout TIMEOUT     Request timeout in seconds for Prometheus API calls (default: 60)
   --cost-per-1000-series COST
-                        Dollar cost per 1000 active series. If provided, output includes estimated_cost
-                        and is sorted by highest cost.
+                        Dollar cost per 1000 active series (from FOCUS Metrics unit price).
+                        Adds estimated_cost=(series/1000)*rate*dpm and sorts by highest cost.
 
 ## Filtered Metrics
 
@@ -436,14 +473,17 @@ The script requires these Python packages (installed via requirements.txt):
 
 ### One-time Analysis
 ```bash
-# Basic CSV output
+# Cost-aware JSON (recommended) — use Metrics unit price from FOCUS
+./dpm-finder.py -f json -m 2.0 -t 8 --timeout 120 -l 10 --cost-per-1000-series 6.50
+
+# Basic CSV output (sorts by DPM only without cost flag)
 ./dpm-finder.py
 
 # JSON output with high threshold and more threads
 ./dpm-finder.py -f json -m 10.0 -t 16
 
 # Quiet mode for scripting
-./dpm-finder.py -q -f csv -m 2.0
+./dpm-finder.py -q -f csv -m 2.0 --cost-per-1000-series 6.50
 
 # Verbose debugging
 ./dpm-finder.py -v -t 8

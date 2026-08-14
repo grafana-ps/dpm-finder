@@ -267,6 +267,89 @@ def process_metric_chunk(chunk, metric_value_url, username, api_key, results_que
     
     results_queue.put((chunk_results, chunk_times))
 
+INTERPRETATION_DOCS_URL = "https://github.com/grafana-ps/dpm-finder/blob/main/README.md#interpreting-results"
+
+
+def build_interpretation(cost_per_1000_series=None):
+    """Build self-describing interpretation metadata for JSON (and shared field copy)."""
+    cost_enabled = cost_per_1000_series is not None
+    estimated_cost_desc = (
+        "Approximate relative cost: (series_count/1000) * cost_per_1000_series * dpm."
+        if cost_enabled
+        else "Null — pass --cost-per-1000-series to compute estimated_cost = (series_count/1000) * rate * dpm."
+    )
+    return {
+        "summary": (
+            "Use dpm with series_count together; with cost enabled, prioritize by estimated_cost."
+            if cost_enabled
+            else "Use dpm with series_count together. Pass --cost-per-1000-series to rank by estimated spend."
+        ),
+        "fields": {
+            "dpm": "Data points per minute (max across this metric's series). Weak signal alone.",
+            "series_count": "Active time series (cardinality) for this metric.",
+            "estimated_cost": estimated_cost_desc,
+        },
+        "sort_order": (
+            "estimated_cost descending"
+            if cost_enabled
+            else "dpm descending (pass --cost-per-1000-series to sort by estimated_cost)"
+        ),
+        "prioritization": (
+            "Focus remediation on the highest estimated_cost metrics (roughly the top ~10% by spend). "
+            "Deprioritize the long-tail unless a metric is an obvious outlier."
+            if cost_enabled
+            else "Prefer metrics that combine high dpm with high series_count. "
+            "Pass --cost-per-1000-series to prioritize by estimated spend."
+        ),
+        "cost_rate_source": (
+            "Pass $/1000 active series via --cost-per-1000-series from your org's FOCUS "
+            "Metrics ContractedUnitPrice or ListUnitPrice "
+            "(Cost Management and Billing → Invoices → FOCUS download, or "
+            "https://grafana.com/docs/grafana-cloud/platform/cost-management-and-billing/focus/)."
+        ),
+        "documentation": INTERPRETATION_DOCS_URL,
+    }
+
+
+def interpretation_preamble_lines(cost_per_1000_series=None):
+    """Shared interpretation lines (without comment prefix) for all file formats."""
+    lines = [
+        "dpm-finder results — how to interpret",
+        "dpm: data points per minute (weak alone); use with series_count",
+        "series_count: active series (cardinality)",
+    ]
+    if cost_per_1000_series is not None:
+        lines.extend([
+            "estimated_cost: (series_count/1000)*cost_per_1000_series*dpm; sorted highest first",
+            "Prioritize highest estimated_cost; deprioritize the long-tail (~bottom 90% by cost)",
+            "Cost rate: --cost-per-1000-series from FOCUS Metrics ContractedUnitPrice/ListUnitPrice "
+            "(CMAB Invoices → FOCUS, or FOCUS API)",
+        ])
+    else:
+        lines.append(
+            "Pass --cost-per-1000-series from FOCUS Metrics unit price "
+            "(https://grafana.com/docs/grafana-cloud/platform/cost-management-and-billing/focus/) "
+            "to add estimated_cost and sort by cost"
+        )
+    lines.append(f"Docs: {INTERPRETATION_DOCS_URL}")
+    return lines
+
+
+def comment_interpretation_preamble(cost_per_1000_series=None):
+    """'#' comment preamble for CSV and Prometheus exposition files."""
+    return "".join(f"# {line}\n" for line in interpretation_preamble_lines(cost_per_1000_series))
+
+
+def text_interpretation_preamble(cost_per_1000_series=None):
+    """Plain-text preamble for metric_rates.txt."""
+    lines = interpretation_preamble_lines(cost_per_1000_series)
+    return "\n".join(lines) + "\n\n"
+
+
+# Back-compat alias used by older call sites / tests
+csv_interpretation_preamble = comment_interpretation_preamble
+
+
 def get_metric_rates(metric_value_url, username, api_key, metric_names, metric_aggregations, output_format='csv', min_dpm=1, quiet=False, thread_count=10, exporter_mode=False, timeout=60, cost_per_1000_series=None, lookback=10):
     """ 
     Calculate the metric rates
@@ -431,6 +514,7 @@ def get_metric_rates(metric_value_url, username, api_key, metric_names, metric_a
     
     if output_format == 'csv':
         with open("metric_rates.csv", "w", encoding="utf-8") as f:
+            f.write(comment_interpretation_preamble(cost_per_1000_series))
             # Write CSV header
             if cost_per_1000_series is not None:
                 f.write("metric_name,dpm,series_count,estimated_cost\n")
@@ -453,6 +537,7 @@ def get_metric_rates(metric_value_url, username, api_key, metric_names, metric_a
     elif output_format == 'json':
         import json
         output_data = {
+            "interpretation": build_interpretation(cost_per_1000_series),
             "metrics": enriched,
             "total_metrics_above_threshold": metrics_above_threshold,
             "performance_metrics": {
@@ -469,6 +554,12 @@ def get_metric_rates(metric_value_url, username, api_key, metric_names, metric_a
     elif output_format == 'prom':
         output_filename = "metric_rates.prom"
         with open(output_filename, "w", encoding="utf-8") as f:
+            # Human guidance (scrapers ignore unknown '#' comment lines)
+            f.write(comment_interpretation_preamble(cost_per_1000_series))
+            f.write(
+                "# Note: estimated_cost is not emitted as a Prometheus metric; "
+                "use csv/json/text with --cost-per-1000-series for cost ranking.\n\n"
+            )
             # Add HELP and TYPE metadata for DPM metrics
             f.write("# HELP metric_dpm_rate Data points per minute for each metric\n")
             f.write("# TYPE metric_dpm_rate gauge\n")
@@ -513,8 +604,11 @@ def get_metric_rates(metric_value_url, username, api_key, metric_names, metric_a
     else:  # text/txt format
         output_filename = "metric_rates.txt"
         with open(output_filename, "w", encoding="utf-8") as f:
+            preamble = text_interpretation_preamble(cost_per_1000_series)
+            f.write(preamble)
             if not quiet:
-                print("\nMetrics: DPM and cardinality (series count):")
+                print("\n" + preamble, end='')
+                print("Metrics: DPM and cardinality (series count):")
             f.write("Metrics: DPM and cardinality (series count):\n")
             for item in enriched:
                 metric_name = item['metric_name']
@@ -782,7 +876,8 @@ def main():
         '--cost-per-1000-series',
         type=float,
         default=None,
-        help='Optional: Dollar cost per 1000 active series. If provided, output includes estimated_cost and is sorted by highest cost.'
+        help='Dollar cost per 1000 active series (from FOCUS Metrics ContractedUnitPrice/ListUnitPrice). '
+             'Adds estimated_cost=(series/1000)*rate*dpm and sorts by highest cost.'
     )
     args = parser.parse_args()
 
