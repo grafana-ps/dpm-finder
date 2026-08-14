@@ -70,7 +70,13 @@ source {repo_root}/venv/bin/activate
 
 ## Step 4: Obtain Cost Rate and Run Analysis
 
-Before running, ask the user for the contracted **dollar cost per 1000 active series** from [admin.grafana.com](https://admin.grafana.com/). Public list price is only a fallback estimate if they cannot look it up.
+Before running, ask the user for the **dollar cost per 1000 active series** from their org's **FOCUS** cost dataset (stack/org Cost Management and Billing):
+
+1. Grafana Cloud stack → **Cost Management and Billing → Invoices → FOCUS download**, or the [FOCUS API](https://grafana.com/docs/grafana-cloud/platform/cost-management-and-billing/focus/focus-api-usage/)
+2. In the FOCUS CSV, use Metrics **`ContractedUnitPrice`** (preferred) or **`ListUnitPrice`** for `--cost-per-1000-series` (confirm `PricingUnit` is per 1000 series)
+3. Overview: [FOCUS docs](https://grafana.com/docs/grafana-cloud/platform/cost-management-and-billing/focus/)
+
+Public list price on grafana.com/pricing is only a last-resort estimate if FOCUS is unavailable.
 
 Execute the tool with JSON output and cost estimation:
 

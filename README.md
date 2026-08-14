@@ -54,13 +54,19 @@ python3 -m pip install -r requirements.txt
 
 **One-time execution (recommended: cost-aware):**
 
-Procure the contracted dollar cost per 1000 active series from [admin.grafana.com](https://admin.grafana.com/), then:
+Obtain your org's **$/1000 active series** from FOCUS cost data (available on the Grafana Cloud stack / org):
+
+1. In the stack: **Cost Management and Billing → Invoices → FOCUS download** for the billing period ([CMAB docs](https://grafana.com/docs/grafana-cloud/platform/cost-management-and-billing/focus/focus-cmab-app-usage/)), **or**
+2. Via the [FOCUS API](https://grafana.com/docs/grafana-cloud/platform/cost-management-and-billing/focus/focus-api-usage/) (`org-billing-focus:read` token).
+3. In the FOCUS CSV, find **Metrics** rows and use **`ContractedUnitPrice`** (preferred) or **`ListUnitPrice`** as `--cost-per-1000-series`. Confirm `PricingUnit` matches per-1000-series billing (convert if your export uses a different unit).
+
+See [FOCUS overview](https://grafana.com/docs/grafana-cloud/platform/cost-management-and-billing/focus/). Public list price on [grafana.com/pricing](https://grafana.com/pricing/) is only a last-resort estimate.
 
 ```bash
 ./dpm-finder.py -f json -m 2.0 -t 8 --timeout 120 -l 10 --cost-per-1000-series 6.50
 ```
 
-Replace `6.50` with the customer's rate. Without `--cost-per-1000-series`, results sort by DPM only.
+Replace `6.50` with the rate from FOCUS. Without `--cost-per-1000-series`, results sort by DPM only.
 
 **Prometheus exporter mode:**
 ```bash
@@ -82,7 +88,7 @@ DPM alone is a weak signal. Use **DPM together with `series_count` (cardinality)
 
 ### Cost-aware analysis (recommended)
 
-1. Pass `--cost-per-1000-series` with the customer's contracted rate from [admin.grafana.com](https://admin.grafana.com/) (public list price is only a fallback estimate).
+1. Pass `--cost-per-1000-series` with the Metrics unit price from your org's **FOCUS** dataset (Cost Management and Billing → Invoices → FOCUS download, or the [FOCUS API](https://grafana.com/docs/grafana-cloud/platform/cost-management-and-billing/focus/focus-api-usage/)). Prefer `ContractedUnitPrice`, else `ListUnitPrice`. Public list price is only a last-resort estimate.
 2. Output includes `estimated_cost` and is **sorted by highest cost first**.
 3. Focus remediation on the **highest `estimated_cost` metrics** (roughly the top ~10% by spend). Deprioritize the long-tail (~bottom 90% by cost) unless a metric is an obvious outlier.
 4. For top metrics, examine `series_detail` to see which label combinations drive the highest DPM.
@@ -442,7 +448,7 @@ optional arguments:
                          How often to update metrics in exporter mode, in seconds (default: 1 day or 86400 seconds)
   --timeout TIMEOUT     Request timeout in seconds for Prometheus API calls (default: 60)
   --cost-per-1000-series COST
-                        Dollar cost per 1000 active series (from admin.grafana.com).
+                        Dollar cost per 1000 active series (from FOCUS Metrics unit price).
                         Adds estimated_cost=(series/1000)*rate*dpm and sorts by highest cost.
 
 ## Filtered Metrics
@@ -467,7 +473,7 @@ The script requires these Python packages (installed via requirements.txt):
 
 ### One-time Analysis
 ```bash
-# Cost-aware JSON (recommended) — use rate from admin.grafana.com
+# Cost-aware JSON (recommended) — use Metrics unit price from FOCUS
 ./dpm-finder.py -f json -m 2.0 -t 8 --timeout 120 -l 10 --cost-per-1000-series 6.50
 
 # Basic CSV output (sorts by DPM only without cost flag)

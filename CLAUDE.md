@@ -58,13 +58,13 @@ Extract `cluster_slug` for the endpoint URL and `id` for the username.
 
 ### One-Shot Analysis (primary use case)
 
-Procure the contracted $/1000 active series from https://admin.grafana.com/, then:
+Obtain $/1000 active series from the org's **FOCUS** cost dataset (stack-level Cost Management and Billing → Invoices → FOCUS download, or the [FOCUS API](https://grafana.com/docs/grafana-cloud/platform/cost-management-and-billing/focus/focus-api-usage/)). Prefer Metrics `ContractedUnitPrice`, else `ListUnitPrice`. See [FOCUS docs](https://grafana.com/docs/grafana-cloud/platform/cost-management-and-billing/focus/). Then:
 
 ```bash
 ./dpm-finder.py -f json -m 2.0 -t 8 --timeout 120 -l 10 --cost-per-1000-series 6.50
 ```
 
-Replace `6.50` with the customer's rate. Without the flag, results sort by DPM only.
+Replace `6.50` with the FOCUS-derived rate. Without the flag, results sort by DPM only.
 
 ### CLI Flags Reference
 
@@ -75,7 +75,7 @@ Replace `6.50` with the customer's rate. Without the flag, results sort by DPM o
 | `-t`, `--threads` | `10` | Concurrent processing threads |
 | `-l`, `--lookback` | `10` | Lookback window in minutes for DPM calculation |
 | `--timeout` | `60` | API request timeout in seconds |
-| `--cost-per-1000-series` | _(none)_ | $/1000 active series; adds `estimated_cost` = `(series/1000)*rate*dpm` and sorts by highest cost. Get rate from admin.grafana.com |
+| `--cost-per-1000-series` | _(none)_ | $/1000 active series; adds `estimated_cost` = `(series/1000)*rate*dpm` and sorts by highest cost. Get rate from FOCUS Metrics `ContractedUnitPrice` / `ListUnitPrice` |
 | `-q`, `--quiet` | `false` | Suppress progress output |
 | `-v`, `--verbose` | `false` | Enable debug logging |
 | `-e`, `--exporter` | `false` | Run as Prometheus exporter instead of one-shot |
@@ -120,7 +120,7 @@ DPM alone is a weak signal. Use **DPM together with `series_count`** to decide w
 
 ### Cost-aware analysis (recommended)
 
-1. Pass `--cost-per-1000-series` with the customer's contracted rate from https://admin.grafana.com/ (list price is only a fallback).
+1. Pass `--cost-per-1000-series` with the Metrics unit price from the org's **FOCUS** dataset (CMAB Invoices download or FOCUS API). Prefer `ContractedUnitPrice`, else `ListUnitPrice`. List price on grafana.com/pricing is only a last-resort fallback.
 2. Output includes `estimated_cost` and is **sorted by highest cost first**.
 3. Focus remediation on the highest `estimated_cost` metrics (roughly the top ~10% by spend). Deprioritize the long-tail (~bottom 90% by cost) unless a metric is an obvious outlier.
 4. For top metrics, examine `series_detail` to identify which label combinations drive the highest DPM.

@@ -302,8 +302,10 @@ def build_interpretation(cost_per_1000_series=None):
             "Pass --cost-per-1000-series to prioritize by estimated spend."
         ),
         "cost_rate_source": (
-            "Pass contracted $/1000 active series via --cost-per-1000-series "
-            "(from https://admin.grafana.com/)."
+            "Pass $/1000 active series via --cost-per-1000-series from your org's FOCUS "
+            "Metrics ContractedUnitPrice or ListUnitPrice "
+            "(Cost Management and Billing → Invoices → FOCUS download, or "
+            "https://grafana.com/docs/grafana-cloud/platform/cost-management-and-billing/focus/)."
         ),
         "documentation": INTERPRETATION_DOCS_URL,
     }
@@ -320,11 +322,14 @@ def interpretation_preamble_lines(cost_per_1000_series=None):
         lines.extend([
             "estimated_cost: (series_count/1000)*cost_per_1000_series*dpm; sorted highest first",
             "Prioritize highest estimated_cost; deprioritize the long-tail (~bottom 90% by cost)",
-            "Cost rate: --cost-per-1000-series from https://admin.grafana.com/",
+            "Cost rate: --cost-per-1000-series from FOCUS Metrics ContractedUnitPrice/ListUnitPrice "
+            "(CMAB Invoices → FOCUS, or FOCUS API)",
         ])
     else:
         lines.append(
-            "Pass --cost-per-1000-series (from https://admin.grafana.com/) to add estimated_cost and sort by cost"
+            "Pass --cost-per-1000-series from FOCUS Metrics unit price "
+            "(https://grafana.com/docs/grafana-cloud/platform/cost-management-and-billing/focus/) "
+            "to add estimated_cost and sort by cost"
         )
     lines.append(f"Docs: {INTERPRETATION_DOCS_URL}")
     return lines
@@ -871,7 +876,7 @@ def main():
         '--cost-per-1000-series',
         type=float,
         default=None,
-        help='Dollar cost per 1000 active series (from admin.grafana.com). '
+        help='Dollar cost per 1000 active series (from FOCUS Metrics ContractedUnitPrice/ListUnitPrice). '
              'Adds estimated_cost=(series/1000)*rate*dpm and sorts by highest cost.'
     )
     args = parser.parse_args()
