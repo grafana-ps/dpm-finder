@@ -193,6 +193,7 @@ class AdaptiveMetricQueryTests(unittest.TestCase):
             )
 
         queries = [call.kwargs["params"]["query"] for call in request.call_args_list]
+        self.assertTrue(queries[0].startswith("count_over_time("))
         self.assertIn('__aggregation__!="none"', queries[0])
         self.assertIn('__ignore_usage__=""', queries[0])
         self.assertIn('__aggregation__!="none"', queries[1])
@@ -203,6 +204,29 @@ class AdaptiveMetricQueryTests(unittest.TestCase):
             payload["scrape_samples_scraped"]["series_detail"][0]["labels"],
             {"__aggregation__": "sum", "cluster": "prod"},
         )
+
+    def test_no_series_detail_reduces_dpm_on_the_server(self):
+        responses = [
+            FakeResponse({"data": {"result": [{"metric": {}, "value": [1, "2.0"]}]}}),
+            FakeResponse({"data": {"result": [{"value": [1, "2393"]}]}}),
+        ]
+        results = queue.Queue()
+
+        with patch.object(dpm_finder, "make_request_with_retry", side_effect=responses) as request:
+            dpm_finder.process_metric_chunk(
+                ["scrape_samples_scraped"],
+                "https://prometheus.example.net/api/prom/api/v1/query",
+                "123",
+                "token",
+                results,
+                lookback=10,
+                collect_series_detail=False,
+                adaptive_metrics={"scrape_samples_scraped"},
+            )
+
+        queries = [call.kwargs["params"]["query"] for call in request.call_args_list]
+        self.assertTrue(queries[0].startswith("max(count_over_time("))
+        self.assertEqual(results.get_nowait()[0]["scrape_samples_scraped"]["dpm"], 2.0)
 
     def test_retries_explicit_adaptive_metrics_422_against_stored_series(self):
         adaptive_error = http_error(

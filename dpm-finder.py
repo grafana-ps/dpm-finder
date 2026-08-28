@@ -435,6 +435,14 @@ def metric_selector(metric, adaptive_metric=False):
     return f"{metric}{{{','.join(matchers)}}}"
 
 
+def metric_dpm_query(selector, lookback, collect_series_detail=False):
+    """Build the DPM query, reducing on the server when labels are not needed."""
+    query = 'count_over_time(%s[%dm])/%d' % (selector, lookback, lookback)
+    if collect_series_detail:
+        return query
+    return f"max({query})"
+
+
 def filter_metric_names(metric_names, include_histograms=False):
     """Filter internal and, by default, verified classic histogram component series.
 
@@ -493,7 +501,7 @@ def process_metric_chunk(chunk, metric_value_url, username, api_key, results_que
         # DPM over lookback window, per minute
         adaptive_metric = metric in adaptive_metrics
         selector = metric_selector(metric, adaptive_metric)
-        query_dpm = 'count_over_time(%s[%dm])/%d' % (selector, lookback, lookback)
+        query_dpm = metric_dpm_query(selector, lookback, collect_series_detail)
         response_dpm = query_metric(
             metric_value_url, username, api_key, query_dpm,
             quiet=quiet, timeout=timeout, gcx_client=gcx_client,
@@ -502,7 +510,7 @@ def process_metric_chunk(chunk, metric_value_url, username, api_key, results_que
         if isinstance(response_dpm, Exception) and not adaptive_metric and is_adaptive_metrics_query_error(response_dpm):
             adaptive_metric = True
             selector = metric_selector(metric, adaptive_metric=True)
-            query_dpm = 'count_over_time(%s[%dm])/%d' % (selector, lookback, lookback)
+            query_dpm = metric_dpm_query(selector, lookback, collect_series_detail)
             if not quiet:
                 logger.info(
                     f"Adaptive Metrics aggregation detected for {metric}; retrying against the "
