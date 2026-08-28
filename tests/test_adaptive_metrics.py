@@ -105,12 +105,12 @@ class MetricFilteringTests(unittest.TestCase):
             metrics,
         )
 
-    def test_excludes_summary_count_and_sum_only_with_family_siblings(self):
+    def test_keeps_ambiguous_summary_like_siblings(self):
         metrics = ["rpc_duration_seconds", "rpc_duration_seconds_count", "rpc_duration_seconds_sum"]
 
         self.assertEqual(
             dpm_finder.filter_metric_names(metrics, include_histograms=False),
-            ["rpc_duration_seconds"],
+            metrics,
         )
 
 

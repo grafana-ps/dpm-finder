@@ -18,8 +18,8 @@ The script does the following:
 
 1.  **Retrieves all metrics** from a Prometheus instance using the `/api/v1/label/__name__/values` endpoint.
 2.  **Filters metrics** automatically to exclude:
-    - Classic histogram/summary components ending with `_count`, `_bucket`, or `_sum`, unless
-      `--include-histograms` is set
+    - Components from verified classic histogram families with `_bucket`, `_count`, and `_sum`
+      siblings, unless `--include-histograms` is set. Ambiguous suffixed metrics are retained.
     - Metrics beginning with `grafana_` (Grafana internal metrics)
     - Native histogram base metrics remain included because they are single first-class series,
       not suffixed component series
@@ -447,7 +447,8 @@ optional arguments:
   --cost-per-1000-series COST
                         Dollar cost per 1000 active series. If provided, output includes estimated_cost
                         and is sorted by highest cost.
-  --include-histograms Include classic histogram/summary component series (_bucket, _count, _sum).
+  --include-histograms Include components from verified classic histogram families
+                        (_bucket, _count, _sum).
                         Native histogram base metrics are always included.
   --no-series-detail  Do not retain per-series labels in JSON/text output, reducing memory usage on
                         large stacks.
@@ -460,8 +461,8 @@ optional arguments:
 
 The script automatically excludes certain metric types to focus on meaningful data:
 
-- **Classic histogram/summary components**: Metrics ending with `_count`, `_bucket`, or `_sum` are
-  excluded by default and included with `--include-histograms`.
+- **Classic histogram components**: Complete `_bucket`, `_count`, and `_sum` families are excluded
+  by default and included with `--include-histograms`. Ambiguous suffix metrics remain included.
 - **Native histograms**: Base metrics are always analyzed. `count_over_time` counts native histogram
   samples numerically, so their DPM and active-series count use the same output fields as float series.
 - **Grafana internal metrics**: Metrics beginning with `grafana_`
@@ -492,7 +493,7 @@ The script requires these Python packages (installed via requirements.txt):
 # Memory-bounded JSON output without per-series label dictionaries
 ./dpm-finder.py -f json --no-series-detail
 
-# Include classic histogram and summary component series
+# Include classic histogram component series
 ./dpm-finder.py --include-histograms
 
 # Quiet mode for scripting

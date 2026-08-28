@@ -1,6 +1,7 @@
 import json
 import queue
 import subprocess
+import sys
 import unittest
 from unittest.mock import patch
 
@@ -110,6 +111,18 @@ class GCXClientTests(unittest.TestCase):
         self.assertNotIn('__aggregation__!="none"', client.query.call_args_list[0].args[0])
         self.assertIn('__aggregation__!="none"', client.query.call_args_list[1].args[0])
         self.assertIn("scrape_samples_scraped", results.get_nowait()[0])
+
+
+class MainExitStatusTests(unittest.TestCase):
+    def test_one_shot_inventory_failure_exits_nonzero(self):
+        with patch.object(sys, "argv", ["dpm-finder.py", "--gcx", "--quiet"]):
+            with patch.object(
+                dpm_finder, "collect_metric_inventory", return_value=(None, None)
+            ):
+                with self.assertRaises(SystemExit) as exit_error:
+                    dpm_finder.main()
+
+        self.assertEqual(exit_error.exception.code, 1)
 
 
 if __name__ == "__main__":

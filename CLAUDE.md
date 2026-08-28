@@ -130,9 +130,11 @@ When running dpm-finder against multiple stacks, limit to **max 3 concurrent** r
 ## Metric Filtering
 
 The tool automatically excludes:
-- Histogram/summary components: `*_count`, `*_bucket`, `*_sum` suffixes
+- Verified classic histogram families with `*_bucket`, `*_count`, and `*_sum` siblings; ambiguous
+  suffixed metrics remain included
 - Grafana internal metrics: `grafana_*` prefix
-- Metrics with aggregation rules defined in the cluster (fetched from `/aggregations/rules`)
+
+Adaptive Metrics series and native histogram base metrics remain included and are analyzed directly.
 
 ## Exporter Mode
 

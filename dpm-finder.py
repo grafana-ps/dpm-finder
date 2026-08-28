@@ -436,10 +436,12 @@ def metric_selector(metric, adaptive_metric=False):
 
 
 def filter_metric_names(metric_names, include_histograms=False):
-    """Filter internal and, by default, classic histogram/summary component series.
+    """Filter internal and, by default, verified classic histogram component series.
 
     Native histograms keep their base metric name and therefore remain included. Their
     histogram samples are reduced to numeric sample counts by count_over_time in the DPM query.
+    Ambiguous _count, _sum, and _bucket names are retained unless all three histogram
+    family siblings are present.
     """
     component_metrics = set()
     if not include_histograms:
@@ -454,15 +456,6 @@ def filter_metric_names(metric_names, include_histograms=False):
                 sum_metric = f'{base}_sum'
                 if count_metric in names and sum_metric in names:
                     component_metrics.update((metric, count_metric, sum_metric))
-
-        # A classic summary has a base quantile series plus count and sum siblings.
-        # Requiring all three preserves unrelated standalone metrics with these suffixes.
-        for metric in names:
-            if metric.endswith('_count'):
-                base = metric[:-len('_count')]
-                sum_metric = f'{base}_sum'
-                if base in names and sum_metric in names:
-                    component_metrics.update((metric, sum_metric))
 
     return [
         metric
@@ -650,7 +643,7 @@ def get_metric_rates(metric_value_url, username, api_key, metric_names, metric_a
         )
 
     # Adaptive Metrics metrics and native histogram base series remain in scope. Classic
-    # histogram/summary components are opt-in because they multiply otherwise similar results.
+    # classic histogram components are opt-in because they multiply otherwise similar results.
     filtered_metrics = filter_metric_names(
         metric_names['data'], include_histograms=include_histograms
     )
@@ -1138,7 +1131,8 @@ def main():
         '--include-histograms',
         action='store_true',
         help=(
-            'Include classic histogram/summary component series (_bucket, _count, _sum). '
+            'Include components from verified classic histogram families '
+            '(_bucket, _count, _sum). '
             'Native histogram base metrics are always included.'
         )
     )
@@ -1291,7 +1285,7 @@ def main():
         )
     else:
         # Run one-time execution
-        get_metric_rates(
+        success = get_metric_rates(
             metric_value_url,
             username,
             api_key,
@@ -1308,6 +1302,8 @@ def main():
             no_series_detail=args.no_series_detail,
             gcx_client=gcx_client,
         )
+        if not success:
+            sys.exit(1)
 
 if __name__ == "__main__":
     main()
