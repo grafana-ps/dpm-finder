@@ -43,6 +43,18 @@ class AdaptiveMetricRuleTests(unittest.TestCase):
             {"exact_metric", "http_requests_total", "worker_duration_seconds"},
         )
 
+    def test_non_list_aggregation_payload_is_ignored_without_crashing(self):
+        metric_names = ["exact_metric"]
+
+        with self.assertLogs(dpm_finder.logger, level="WARNING") as logs:
+            for malformed_payload in (True, 42, "unexpected", {"metric": "exact_metric"}):
+                self.assertEqual(
+                    dpm_finder.get_adaptive_metric_names(metric_names, malformed_payload),
+                    set(),
+                )
+
+        self.assertIn("expected a list", "\n".join(logs.output))
+
     def test_discovers_stored_adaptive_metric_names_in_one_query(self):
         response = FakeResponse(
             {

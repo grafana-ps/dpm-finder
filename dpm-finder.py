@@ -377,6 +377,13 @@ def get_adaptive_metric_names(metric_names, metric_aggregations):
     if not metric_aggregations:
         return set()
 
+    if not isinstance(metric_aggregations, list):
+        logger.warning(
+            "Ignoring Adaptive Metrics aggregation rules: expected a list, got "
+            f"{type(metric_aggregations).__name__}"
+        )
+        return set()
+
     adaptive_metrics = set()
     for rule in metric_aggregations:
         if not isinstance(rule, dict) or not isinstance(rule.get('metric'), str):
