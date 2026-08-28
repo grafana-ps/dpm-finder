@@ -21,19 +21,21 @@ Store the repo root path for all subsequent steps. Read `CLAUDE.md` from the rep
 
 ## Step 2: Stack Discovery
 
-Determine the Prometheus endpoint, username, and API key:
+Determine whether to use an existing GCX login or direct Prometheus credentials:
 
 **Try gcx first:**
 ```bash
 which gcx
 ```
 
-If gcx is available:
+If GCX is available, prefer the script's GCX transport rather than extracting credentials:
 ```bash
 gcx config check
 ```
 
-Present the active stack details to the user and ask them to confirm this is the correct stack. Extract the Prometheus endpoint URL and stack ID.
+Present the active stack details to the user and ask them to confirm this is the correct stack. Keep
+the confirmed context name and run the script with `--gcx --gcx-context CONTEXT`. GCX owns its
+credential storage and refresh; do not read its raw config or extract tokens.
 
 **If gcx is not available or user prefers manual setup:**
 
@@ -45,6 +47,7 @@ grep -v '^#' {repo_root}/.env 2>/dev/null | grep -v '=$' | head -5
 If `.env` is missing or unconfigured, tell the user:
 - Copy `.env_example` to `.env`
 - Fill in `PROMETHEUS_ENDPOINT`, `PROMETHEUS_USERNAME`, `PROMETHEUS_API_KEY`
+- Ensure the API key has both `metrics:read` and `adaptive-metrics-rules:read`
 - Refer to the "Stack Discovery" section in CLAUDE.md for how to find these values
 
 **Always confirm the target stack with the user before proceeding.** Show them the endpoint URL and ask for explicit confirmation.
@@ -73,15 +76,21 @@ source {repo_root}/venv/bin/activate
 Execute the tool with JSON output for structured parsing:
 
 ```bash
-cd {repo_root} && source venv/bin/activate && python3 dpm-finder.py -f json -m 2.0 -t 8 --timeout 120 -l 10
+cd {repo_root} && source venv/bin/activate && python3 dpm-finder.py --gcx --gcx-context CONTEXT -f json -m 2.0 -t 8 --timeout 120 -l 10
 ```
 
-If the user provided custom flags or thresholds, adjust accordingly. See CLAUDE.md for the full CLI flags reference.
+Omit the GCX flags when using a confirmed `.env`. If the user provided custom flags or thresholds,
+adjust accordingly. See CLAUDE.md for the full CLI flags reference.
 
 Monitor the output for errors:
-- **401/403**: Authentication issue -- check API key and username
+- **401/403 fetching metrics**: Check the API key, `metrics:read` scope, and username
+- **401/403 fetching Adaptive Metrics rules**: Add `adaptive-metrics-rules:read`; the tool will
+  continue with 422-based detection if that scope is unavailable
+- **GCX Adaptive Metrics authentication error**: The script continues with stored-series and 422
+  detection; do not reauthenticate or change the selected context without the user's approval
 - **Timeouts**: Suggest increasing `--timeout`
-- **422**: Aggregation rules -- these are skipped automatically
+- **Adaptive Metrics 422**: The tool retries the stored aggregated series automatically
+- **Other 422 responses**: The affected metric is skipped and the server error is logged
 
 ## Step 5: Present Results
 
