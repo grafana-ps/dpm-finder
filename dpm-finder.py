@@ -7,6 +7,8 @@ and return the results
 import os
 import time
 import argparse
+import json
+import subprocess
 import requests
 from requests import HTTPError
 import threading
@@ -21,6 +23,111 @@ from prometheus_client import Gauge, Counter, Info, start_http_server, Collector
 
 # Set up module-level logger
 logger = logging.getLogger(__name__)
+
+
+class JSONResponse:
+    """Small response adapter shared by direct HTTP and GCX transports."""
+
+    def __init__(self, payload):
+        self.payload = payload
+
+    def json(self):
+        return self.payload
+
+
+class GCXCommandError(Exception):
+    """A safe, actionable failure returned by the GCX subprocess transport."""
+
+
+class GCXClient:
+    """Run Prometheus and Adaptive Metrics reads through GCX's authenticated context."""
+
+    def __init__(self, binary="gcx", context=None, datasource=None, timeout=60):
+        self.binary = binary
+        self.context = context
+        self.datasource = datasource
+        self.timeout = timeout
+
+    def _run(self, command, include_datasource=False):
+        argv = [self.binary, *command]
+        if self.context:
+            argv.extend(["--context", self.context])
+        if include_datasource and self.datasource:
+            argv.extend(["--datasource", self.datasource])
+        argv.extend(["-o", "json"])
+
+        try:
+            result = subprocess.run(
+                argv,
+                capture_output=True,
+                text=True,
+                timeout=self.timeout,
+                check=False,
+            )
+        except FileNotFoundError as error:
+            raise GCXCommandError(
+                f"GCX binary '{self.binary}' was not found; install gcx or provide a path "
+                "with --gcx-binary and ensure it is on PATH"
+            ) from error
+        except subprocess.TimeoutExpired as error:
+            raise GCXCommandError(
+                f"GCX command exceeded the {self.timeout}s timeout"
+            ) from error
+        except OSError as error:
+            raise GCXCommandError(f"Unable to start GCX: {error}") from error
+
+        if result.returncode != 0:
+            detail = (result.stderr or result.stdout or "unknown GCX error").strip()
+            raise GCXCommandError(detail)
+
+        try:
+            return json.loads(result.stdout)
+        except (TypeError, json.JSONDecodeError) as error:
+            raise GCXCommandError("GCX returned invalid JSON") from error
+
+    def query(self, expression):
+        payload = self._run(
+            ["metrics", "query", expression], include_datasource=True
+        )
+        if not isinstance(payload, dict):
+            raise GCXCommandError("GCX metrics query returned an unexpected JSON shape")
+        return JSONResponse(payload)
+
+    def list_metric_names(self):
+        payload = self._run(
+            ["metrics", "list-names", "--limit", "0"], include_datasource=True
+        )
+        if not isinstance(payload, dict) or not isinstance(payload.get("data"), list):
+            raise GCXCommandError("GCX metric-name query returned an unexpected JSON shape")
+        return payload
+
+    def list_adaptive_metrics_rules(self):
+        payload = self._run(
+            ["metrics", "adaptive", "rules", "list", "--limit", "0"]
+        )
+        if not isinstance(payload, list):
+            raise GCXCommandError("GCX Adaptive Metrics rules returned an unexpected JSON shape")
+        return payload
+
+
+def query_metric(metric_value_url, username, api_key, query, quiet=False, timeout=60,
+                 gcx_client=None):
+    """Execute one PromQL instant query through direct HTTP or GCX."""
+    if gcx_client is not None:
+        try:
+            return gcx_client.query(query)
+        except GCXCommandError as error:
+            if not quiet:
+                logger.warning(f"GCX metrics query failed: {error}")
+            return error
+
+    return make_request_with_retry(
+        metric_value_url,
+        auth=HTTPBasicAuth(username, api_key),
+        params={"query": query},
+        quiet=quiet,
+        timeout=timeout,
+    )
 
 # Global variables for exporter mode
 shutdown_event = threading.Event()
@@ -38,7 +145,7 @@ def update_prometheus_metrics(filtered_dpm, performance_data):
     """Update Prometheus metrics with latest DPM data"""
     # Clear existing DPM metrics
     dpm_metric.clear()
-    
+
     # Update DPM metrics for each metric
     for metric_name, dpm_value in filtered_dpm.items():
         # Create safe metric name for label
@@ -102,11 +209,11 @@ def make_request_with_retry(url, auth, params=None, max_retries=10, retry_delay=
                                     query_snippet = f" query='{q[:200]}'"
                             except Exception:
                                 pass
-                            # Special-case for aggregated metric error (422 commonly used by GEM/Mimir)
+                            # Preserve the server detail so callers can classify a 422 precisely.
                             if status == 422:
-                                logger.warning(f"Skipping due to Prometheus 422: {err_detail}.{query_snippet}")
+                                logger.warning(f"Prometheus query rejected with HTTP 422: {err_detail}.{query_snippet}")
                             else:
-                                logger.warning(f"Skipping due to client error {status}: {err_detail}.{query_snippet}")
+                                logger.warning(f"Request rejected with HTTP {status}: {err_detail}.{query_snippet}")
                         return e
             except Exception:
                 # If any issue determining status, fall back to retry path below
@@ -147,11 +254,12 @@ def retry_with_backoff(operation, operation_name, max_retries=3, retry_delay=2, 
                     logger.error(f"{operation_name} failed after {max_retries} attempts: {str(e)}")
                 return None
 
-def get_metric_json(url, username, api_key, quiet=False, timeout=60):
+def get_metric_json(url, username, api_key, quiet=False, timeout=60,
+                    resource_name="metric data", required_scope=None):
     """
-    Get the metric names from the Prometheus API
+    Get JSON data from a Prometheus or Adaptive Metrics API endpoint.
     Returns:
-        On success: Dictionary containing metric names
+        On success: Decoded JSON data
         On failure: None
     """
     response = make_request_with_retry(
@@ -163,42 +271,272 @@ def get_metric_json(url, username, api_key, quiet=False, timeout=60):
     
     if isinstance(response, Exception):
         if not quiet:
-            logger.error(f"Error retrieving metric names: {str(response)}")
+            status = None
+            if isinstance(response, HTTPError) and response.response is not None:
+                status = response.response.status_code
+            if required_scope and status in (401, 403):
+                logger.error(
+                    f"Unable to retrieve {resource_name}: HTTP {status}. The token must include "
+                    f"the '{required_scope}' scope; continuing with 422 fallback detection."
+                )
+            else:
+                logger.error(f"Unable to retrieve {resource_name}: {str(response)}")
         return None
     
     try:
         return response.json()
     except Exception as e:
         if not quiet:
-            logger.error(f"Error parsing metric names response: {str(e)}")
+            logger.error(f"Unable to parse {resource_name} response: {str(e)}")
         return None
 
-def process_metric_chunk(chunk, metric_value_url, username, api_key, results_queue, quiet=False, timeout=60, lookback=10, collect_series_detail=False):
+
+def get_adaptive_metrics_rules(url, username, api_key, quiet=False, timeout=60):
+    """Fetch applied Adaptive Metrics rules with an actionable permission error."""
+    return get_metric_json(
+        url,
+        username,
+        api_key,
+        quiet=quiet,
+        timeout=timeout,
+        resource_name="Adaptive Metrics aggregation rules",
+        required_scope="adaptive-metrics-rules:read",
+    )
+
+
+def collect_metric_inventory(metric_name_url, metric_aggregation_url, username, api_key,
+                             quiet=False, timeout=60, gcx_client=None):
+    """Fetch metric names and best-effort Adaptive Metrics rules through one transport."""
+    if gcx_client is None:
+        return (
+            get_metric_json(metric_name_url, username, api_key, quiet=quiet, timeout=timeout),
+            get_adaptive_metrics_rules(
+                metric_aggregation_url, username, api_key, quiet=quiet, timeout=timeout
+            ),
+        )
+
+    try:
+        metric_names = gcx_client.list_metric_names()
+    except GCXCommandError as error:
+        if not quiet:
+            logger.error(f"Unable to retrieve metric names through GCX: {error}")
+        return None, None
+
+    try:
+        metric_aggregations = gcx_client.list_adaptive_metrics_rules()
+    except GCXCommandError as error:
+        metric_aggregations = None
+        if not quiet:
+            logger.warning(
+                "Adaptive Metrics rules are unavailable through GCX; continuing with stored-series "
+                f"and 422 detection: {error}"
+            )
+
+    return metric_names, metric_aggregations
+
+
+def get_stored_adaptive_metric_names(metric_value_url, username, api_key, quiet=False, timeout=60,
+                                     gcx_client=None):
+    """Discover metric names with currently stored Adaptive Metrics series."""
+    query = (
+        'group by (__name__) ({__aggregation__=~".+",'
+        '__aggregation__!="none",__ignore_usage__=""})'
+    )
+    response = query_metric(
+        metric_value_url, username, api_key, query,
+        quiet=quiet, timeout=timeout, gcx_client=gcx_client,
+    )
+    if isinstance(response, Exception):
+        if not quiet:
+            logger.warning(
+                "Unable to inventory stored Adaptive Metrics series; continuing with rule and "
+                "422 fallback detection"
+            )
+        return set()
+
+    try:
+        result = response.json().get('data', {}).get('result', [])
+        return {
+            item['metric']['__name__']
+            for item in result
+            if isinstance(item, dict)
+            and isinstance(item.get('metric'), dict)
+            and isinstance(item['metric'].get('__name__'), str)
+        }
+    except Exception as e:
+        if not quiet:
+            logger.warning(
+                f"Unable to parse stored Adaptive Metrics inventory: {str(e)}; continuing with "
+                "rule and 422 fallback detection"
+            )
+        return set()
+
+
+def get_adaptive_metric_names(metric_names, metric_aggregations):
+    """Return metric names covered by exact, prefix, or suffix Adaptive Metrics rules."""
+    if not metric_aggregations:
+        return set()
+
+    if not isinstance(metric_aggregations, list):
+        logger.warning(
+            "Ignoring Adaptive Metrics aggregation rules: expected a list, got "
+            f"{type(metric_aggregations).__name__}"
+        )
+        return set()
+
+    adaptive_metrics = set()
+    for rule in metric_aggregations:
+        if not isinstance(rule, dict) or not isinstance(rule.get('metric'), str):
+            continue
+
+        rule_metric = rule['metric']
+        match_type = rule.get('match_type', 'exact')
+        if match_type == 'exact':
+            adaptive_metrics.update(metric for metric in metric_names if metric == rule_metric)
+        elif match_type == 'prefix':
+            adaptive_metrics.update(metric for metric in metric_names if metric.startswith(rule_metric))
+        elif match_type == 'suffix':
+            adaptive_metrics.update(metric for metric in metric_names if metric.endswith(rule_metric))
+        else:
+            logger.warning(
+                f"Ignoring Adaptive Metrics rule for '{rule_metric}' with unsupported match_type "
+                f"'{match_type}'"
+            )
+
+    return adaptive_metrics
+
+
+def is_adaptive_metrics_query_error(error):
+    """Return True only for the explicit Adaptive Metrics aggregated-query 422."""
+    if isinstance(error, GCXCommandError):
+        detail = str(error).lower()
+        return "can't query aggregated metric" in detail and "without aggregation" in detail
+    if not isinstance(error, HTTPError) or error.response is None:
+        return False
+    if error.response.status_code != 422:
+        return False
+
+    try:
+        payload = error.response.json()
+    except Exception:
+        detail = error.response.text or ''
+    else:
+        if not isinstance(payload, dict):
+            return False
+        detail = payload.get('error', '')
+        if not isinstance(detail, str):
+            return False
+    detail = detail.lower()
+    return "can't query aggregated metric" in detail and "without aggregation" in detail
+
+
+def metric_selector(metric, adaptive_metric=False):
+    """Build a selector that does not affect recommendations and can inspect AM storage."""
+    matchers = ['__ignore_usage__=""']
+    if adaptive_metric:
+        # This disables Adaptive Metrics query mapping and exposes stored aggregated series.
+        matchers.extend([
+            '__aggregation__=~".+"',
+            '__aggregation__!="none"',
+        ])
+    return f"{metric}{{{','.join(matchers)}}}"
+
+
+def metric_dpm_query(selector, lookback, collect_series_detail=False):
+    """Build the DPM query, reducing on the server when labels are not needed."""
+    query = 'count_over_time(%s[%dm])/%d' % (selector, lookback, lookback)
+    if collect_series_detail:
+        return query
+    return f"max({query})"
+
+
+def filter_metric_names(metric_names, include_histograms=False):
+    """Filter internal and, by default, verified classic histogram component series.
+
+    Native histograms keep their base metric name and therefore remain included. Their
+    histogram samples are reduced to numeric sample counts by count_over_time in the DPM query.
+    Ambiguous _count, _sum, and _bucket names are retained unless all three histogram
+    family siblings are present.
+    """
+    component_metrics = set()
+    if not include_histograms:
+        names = set(metric_names)
+
+        # A bucket series identifies a classic histogram family. Only remove count/sum
+        # components after verifying the complete bucket/count/sum family.
+        for metric in names:
+            if metric.endswith('_bucket'):
+                base = metric[:-len('_bucket')]
+                count_metric = f'{base}_count'
+                sum_metric = f'{base}_sum'
+                if count_metric in names and sum_metric in names:
+                    component_metrics.update((metric, count_metric, sum_metric))
+
+    return [
+        metric
+        for metric in metric_names
+        if not metric.startswith('grafana_')
+        and metric not in component_metrics
+    ]
+
+
+def should_collect_series_detail(output_format, exporter_mode=False, no_series_detail=False):
+    """Return whether per-series labels should be retained in memory and output."""
+    return (
+        not exporter_mode
+        and not no_series_detail
+        and output_format in ('json', 'text', 'txt')
+    )
+
+
+def process_metric_chunk(chunk, metric_value_url, username, api_key, results_queue, quiet=False,
+                         timeout=60, lookback=10, collect_series_detail=False,
+                         adaptive_metrics=None, gcx_client=None):
     """
     Process a chunk of metrics and put results in the queue
     """
     chunk_results = {}
     chunk_times = []
     
+    adaptive_metrics = adaptive_metrics or set()
+
     for metric in chunk:
         metric_start_time = time.time()
         if not quiet:
             logger.debug(f"Processing metric: {metric}")
         
         # DPM over lookback window, per minute
-        query_dpm = 'count_over_time(%s{__ignore_usage__=""}[%dm])/%d' % (metric, lookback, lookback)
-        response_dpm = make_request_with_retry(
-            metric_value_url,
-            auth=HTTPBasicAuth(username, api_key),
-            params={"query": query_dpm},
-            quiet=quiet,
-            timeout=timeout
+        adaptive_metric = metric in adaptive_metrics
+        selector = metric_selector(metric, adaptive_metric)
+        query_dpm = metric_dpm_query(selector, lookback, collect_series_detail)
+        response_dpm = query_metric(
+            metric_value_url, username, api_key, query_dpm,
+            quiet=quiet, timeout=timeout, gcx_client=gcx_client,
         )
+
+        if isinstance(response_dpm, Exception) and not adaptive_metric and is_adaptive_metrics_query_error(response_dpm):
+            adaptive_metric = True
+            selector = metric_selector(metric, adaptive_metric=True)
+            query_dpm = metric_dpm_query(selector, lookback, collect_series_detail)
+            if not quiet:
+                logger.info(
+                    f"Adaptive Metrics aggregation detected for {metric}; retrying against the "
+                    "stored aggregated series"
+                )
+            response_dpm = query_metric(
+                metric_value_url, username, api_key, query_dpm,
+                quiet=quiet, timeout=timeout, gcx_client=gcx_client,
+            )
         
         if isinstance(response_dpm, Exception):
-            if isinstance(response_dpm, HTTPError) and response_dpm.response is not None and response_dpm.response.status_code == 422:
+            if is_adaptive_metrics_query_error(response_dpm):
                 if not quiet:
-                    logger.warning(f"Skipping metric due to Prometheus 422: {metric}")
+                    logger.warning(
+                        f"Unable to query Adaptive Metrics aggregated series for {metric}; skipping metric"
+                    )
+            elif isinstance(response_dpm, HTTPError) and response_dpm.response is not None and response_dpm.response.status_code == 422:
+                if not quiet:
+                    logger.warning(f"Skipping metric due to unrelated Prometheus 422: {metric}")
             else:
                 if not quiet:
                     logger.error(f"Error processing metric {metric}: {str(response_dpm)}")
@@ -229,13 +567,10 @@ def process_metric_chunk(chunk, metric_value_url, username, api_key, results_que
         
         # Series cardinality (active series count at evaluation time)
         # Keep the same selector pattern for consistency with DPM query
-        query_series = 'count(%s{__ignore_usage__=""})' % (metric)
-        response_series = make_request_with_retry(
-            metric_value_url,
-            auth=HTTPBasicAuth(username, api_key),
-            params={"query": query_series},
-            quiet=quiet,
-            timeout=timeout
+        query_series = 'count(%s)' % selector
+        response_series = query_metric(
+            metric_value_url, username, api_key, query_series,
+            quiet=quiet, timeout=timeout, gcx_client=gcx_client,
         )
         
         series_count_value = None
@@ -267,7 +602,10 @@ def process_metric_chunk(chunk, metric_value_url, username, api_key, results_que
     
     results_queue.put((chunk_results, chunk_times))
 
-def get_metric_rates(metric_value_url, username, api_key, metric_names, metric_aggregations, output_format='csv', min_dpm=1, quiet=False, thread_count=10, exporter_mode=False, timeout=60, cost_per_1000_series=None, lookback=10):
+def get_metric_rates(metric_value_url, username, api_key, metric_names, metric_aggregations,
+                     output_format='csv', min_dpm=1, quiet=False, thread_count=10,
+                     exporter_mode=False, timeout=60, cost_per_1000_series=None, lookback=10,
+                     include_histograms=False, no_series_detail=False, gcx_client=None):
     """ 
     Calculate the metric rates
     Args:
@@ -282,6 +620,8 @@ def get_metric_rates(metric_value_url, username, api_key, metric_names, metric_a
         thread_count: Number of threads to use for processing (minimum: 1)
         exporter_mode: If True, calculate metrics for exporter mode
         cost_per_1000_series: Optional float; if provided, compute and sort by estimated cost
+        include_histograms: Include classic _bucket, _count, and _sum component series
+        no_series_detail: Do not retain per-series labels for JSON/text output
     Returns:
         True if processing was successful, False otherwise
     """
@@ -299,28 +639,29 @@ def get_metric_rates(metric_value_url, username, api_key, metric_names, metric_a
         if not quiet:
             logger.info(f"Found {len(metric_names['data'])} metrics")
 
-    # Create set of metrics that have aggregation rules
-    aggregated_metrics = set()
-    if metric_aggregations is not None:
-        try:
-            # Extract metric names from the aggregation rules
-            for rule in metric_aggregations:
-                if isinstance(rule, dict) and 'metric' in rule:
-                    aggregated_metrics.add(rule['metric'])
-            if not quiet:
-                logger.info(f"Found {len(aggregated_metrics)} metrics with aggregation rules")
+    rule_adaptive_metrics = get_adaptive_metric_names(metric_names['data'], metric_aggregations)
+    stored_adaptive_metrics = get_stored_adaptive_metric_names(
+        metric_value_url, username, api_key, quiet=quiet, timeout=timeout,
+        gcx_client=gcx_client,
+    )
+    adaptive_metrics = rule_adaptive_metrics | stored_adaptive_metrics
+    if not quiet:
+        if metric_aggregations is None:
+            logger.warning(
+                "Adaptive Metrics rules are unavailable; aggregated metrics will be detected from "
+                "stored series and explicit Prometheus 422 responses"
+            )
+        logger.info(
+            f"Adaptive Metrics discovery found {len(rule_adaptive_metrics)} metrics from current "
+            f"rules and {len(stored_adaptive_metrics)} from stored aggregated series "
+            f"({len(adaptive_metrics)} unique); analyzing them directly"
+        )
 
-        except Exception as e:
-            if not quiet:
-                logger.warning(f"Error processing aggregation rules: {str(e)}")
-    
-    # Filter metrics that don't end with _count, _bucket, _sum, don't begin with grafana_, and are not in aggregation rules
-    filtered_metrics = [
-        metric for metric in metric_names['data']
-        if not any(metric.endswith(suffix) for suffix in ['null'])
-        and not metric.startswith('grafana_')
-        and metric not in aggregated_metrics
-    ]
+    # Adaptive Metrics metrics and native histogram base series remain in scope. Classic
+    # classic histogram components are opt-in because they multiply otherwise similar results.
+    filtered_metrics = filter_metric_names(
+        metric_names['data'], include_histograms=include_histograms
+    )
     
     if not quiet:
         logger.info(f"Filtered to {len(filtered_metrics)} metrics - checking for DPM")
@@ -339,14 +680,19 @@ def get_metric_rates(metric_value_url, username, api_key, metric_names, metric_a
     if not quiet:
         logger.info(f"Processing {total_metrics} metrics in {len(metric_chunks)} chunks using {thread_count} threads")
     
-    # Only collect per-series detail for formats that use it
-    collect_series_detail = not exporter_mode and output_format in ('json', 'text', 'txt')
+    # Per-series labels are the dominant memory cost on large JSON/text runs.
+    collect_series_detail = should_collect_series_detail(
+        output_format, exporter_mode=exporter_mode, no_series_detail=no_series_detail
+    )
 
     # Create thread pool with the specified number of threads
     with ThreadPoolExecutor(max_workers=thread_count) as executor:
         # Submit tasks to the thread pool
         futures = [
-            executor.submit(process_metric_chunk, chunk, metric_value_url, username, api_key, results_queue, quiet, timeout, lookback, collect_series_detail)
+            executor.submit(
+                process_metric_chunk, chunk, metric_value_url, username, api_key, results_queue,
+                quiet, timeout, lookback, collect_series_detail, adaptive_metrics, gcx_client
+            )
             for chunk in metric_chunks
         ]
         
@@ -548,7 +894,8 @@ def get_metric_rates(metric_value_url, username, api_key, metric_names, metric_a
     return True
 
 def run_metrics_updater(metric_value_url, metric_name_url, metric_aggregation_url, username, api_key,
-                       min_dpm, thread_count, update_interval, quiet, timeout=60, lookback=10):
+                       min_dpm, thread_count, update_interval, quiet, timeout=60, lookback=10,
+                       include_histograms=False, gcx_client=None):
     """
     Run periodic metrics updates for exporter mode
     """
@@ -559,8 +906,10 @@ def run_metrics_updater(metric_value_url, metric_name_url, metric_aggregation_ur
             logger.debug("Fetching metrics for update...")
             
             # Get fresh metric data
-            metric_names = get_metric_json(metric_name_url, username, api_key, quiet=True, timeout=timeout)
-            metric_aggregations = get_metric_json(metric_aggregation_url, username, api_key, quiet=True, timeout=timeout)
+            metric_names, metric_aggregations = collect_metric_inventory(
+                metric_name_url, metric_aggregation_url, username, api_key,
+                quiet=True, timeout=timeout, gcx_client=gcx_client,
+            )
             
             if metric_names is not None:
                 # Calculate metrics in exporter mode
@@ -575,7 +924,9 @@ def run_metrics_updater(metric_value_url, metric_name_url, metric_aggregation_ur
                     thread_count=thread_count,
                     exporter_mode=True,
                     timeout=timeout,
-                    lookback=lookback
+                    lookback=lookback,
+                    include_histograms=include_histograms,
+                    gcx_client=gcx_client,
                 )
                 if success:
                     logger.debug("Metrics updated successfully")
@@ -600,7 +951,8 @@ def run_metrics_updater(metric_value_url, metric_name_url, metric_aggregation_ur
     logger.info("Metrics updater stopped")
 
 def run_exporter(port, metric_value_url, metric_name_url, metric_aggregation_url, username, api_key,
-                min_dpm, thread_count, update_interval, quiet, timeout=60, lookback=10):
+                min_dpm, thread_count, update_interval, quiet, timeout=60, lookback=10,
+                include_histograms=False, gcx_client=None):
     """
     Run the Prometheus exporter server
     """
@@ -618,7 +970,8 @@ def run_exporter(port, metric_value_url, metric_name_url, metric_aggregation_url
         'version': '1.0.0',
         'min_dpm_threshold': str(min_dpm),
         'update_interval_seconds': str(update_interval),
-        'thread_count': str(thread_count)
+        'thread_count': str(thread_count),
+        'include_classic_histograms': str(include_histograms).lower()
     })
     
     # Start HTTP server immediately using prometheus_client
@@ -636,8 +989,10 @@ def run_exporter(port, metric_value_url, metric_name_url, metric_aggregation_url
     logger.info("Performing initial metrics collection...")
     
     def initial_metrics_collection():
-        metric_names = get_metric_json(metric_name_url, username, api_key, quiet=quiet, timeout=timeout)
-        metric_aggregations = get_metric_json(metric_aggregation_url, username, api_key, quiet=quiet, timeout=timeout)
+        metric_names, metric_aggregations = collect_metric_inventory(
+            metric_name_url, metric_aggregation_url, username, api_key,
+            quiet=quiet, timeout=timeout, gcx_client=gcx_client,
+        )
         
         if metric_names is not None:
             success = get_metric_rates(
@@ -651,7 +1006,9 @@ def run_exporter(port, metric_value_url, metric_name_url, metric_aggregation_url
                 thread_count=thread_count,
                 exporter_mode=True,
                 timeout=timeout,
-                lookback=lookback
+                lookback=lookback,
+                include_histograms=include_histograms,
+                gcx_client=gcx_client,
             )
             if success:
                 logger.info("Initial metrics collection completed")
@@ -676,7 +1033,8 @@ def run_exporter(port, metric_value_url, metric_name_url, metric_aggregation_url
     updater_thread = threading.Thread(
         target=run_metrics_updater,
         args=(metric_value_url, metric_name_url, metric_aggregation_url, username, api_key,
-              min_dpm, thread_count, update_interval, quiet, timeout, lookback),
+              min_dpm, thread_count, update_interval, quiet, timeout, lookback,
+              include_histograms, gcx_client),
         daemon=True
     )
     updater_thread.start()
@@ -784,6 +1142,40 @@ def main():
         default=None,
         help='Optional: Dollar cost per 1000 active series. If provided, output includes estimated_cost and is sorted by highest cost.'
     )
+    parser.add_argument(
+        '--include-histograms',
+        action='store_true',
+        help=(
+            'Include components from verified classic histogram families '
+            '(_bucket, _count, _sum). '
+            'Native histogram base metrics are always included.'
+        )
+    )
+    parser.add_argument(
+        '--no-series-detail',
+        action='store_true',
+        help='Do not retain per-series labels in JSON/text output, reducing memory usage on large stacks.'
+    )
+    parser.add_argument(
+        '--gcx',
+        action='store_true',
+        help='Run all metric queries through GCX and reuse its authenticated context.'
+    )
+    parser.add_argument(
+        '--gcx-context',
+        default=None,
+        help='GCX context name (default: the current GCX context). Requires --gcx.'
+    )
+    parser.add_argument(
+        '--gcx-datasource',
+        default=None,
+        help='Prometheus datasource UID (default: the datasource configured in GCX). Requires --gcx.'
+    )
+    parser.add_argument(
+        '--gcx-binary',
+        default='gcx',
+        help='GCX executable name or path (default: gcx). Requires --gcx.'
+    )
     args = parser.parse_args()
 
     # Set logging level based on arguments
@@ -818,6 +1210,9 @@ def main():
         logger.error(f"Invalid lookback {args.lookback}, must be at least 1 minute")
         sys.exit(1)
 
+    if not args.gcx and (args.gcx_context or args.gcx_datasource or args.gcx_binary != 'gcx'):
+        parser.error("--gcx-context, --gcx-datasource, and --gcx-binary require --gcx")
+
     if not args.quiet:
         if args.exporter:
             logger.info("Running in exporter mode:")
@@ -834,18 +1229,56 @@ def main():
         logger.info(f"- Thread count: {args.threads}")
         logger.info(f"- Request timeout: {args.timeout}s")
         logger.info(f"- Lookback window: {args.lookback}m")
+        logger.info(f"- Include classic histogram components: {args.include_histograms}")
+        if not args.exporter and args.format in ('json', 'text', 'txt'):
+            logger.info(f"- Collect per-series detail: {not args.no_series_detail}")
+        if args.gcx:
+            logger.info(f"- Query transport: GCX (context: {args.gcx_context or 'current'})")
+        else:
+            logger.info("- Query transport: direct Prometheus API")
 
     load_dotenv()
-    prometheus_endpoint=os.getenv("PROMETHEUS_ENDPOINT")
-    username=os.getenv("PROMETHEUS_USERNAME")
-    api_key=os.getenv("PROMETHEUS_API_KEY")
+    gcx_client = None
+    if args.gcx:
+        prometheus_endpoint = None
+        username = None
+        api_key = None
+        gcx_client = GCXClient(
+            binary=args.gcx_binary,
+            context=args.gcx_context,
+            datasource=args.gcx_datasource,
+            timeout=args.timeout,
+        )
+    else:
+        prometheus_endpoint = os.getenv("PROMETHEUS_ENDPOINT")
+        username = os.getenv("PROMETHEUS_USERNAME")
+        api_key = os.getenv("PROMETHEUS_API_KEY")
+        missing = [
+            name for name, value in (
+                ("PROMETHEUS_ENDPOINT", prometheus_endpoint),
+                ("PROMETHEUS_USERNAME", username),
+                ("PROMETHEUS_API_KEY", api_key),
+            ) if not value
+        ]
+        if missing:
+            logger.error(f"Missing required environment variables: {', '.join(missing)}")
+            sys.exit(1)
 
-    metric_value_url=f"{prometheus_endpoint}/api/prom/api/v1/query"
-    metric_name_url=f"{prometheus_endpoint}/api/prom/api/v1/label/__name__/values"
-    metric_aggregation_url=f"{prometheus_endpoint}/aggregations/rules"
+    metric_value_url = (
+        f"{prometheus_endpoint}/api/prom/api/v1/query" if prometheus_endpoint else None
+    )
+    metric_name_url = (
+        f"{prometheus_endpoint}/api/prom/api/v1/label/__name__/values"
+        if prometheus_endpoint else None
+    )
+    metric_aggregation_url = (
+        f"{prometheus_endpoint}/aggregations/rules" if prometheus_endpoint else None
+    )
 
-    metric_names = get_metric_json(metric_name_url, username, api_key, quiet=args.quiet, timeout=args.timeout)
-    metric_aggregations = get_metric_json(metric_aggregation_url, username, api_key, quiet=args.quiet, timeout=args.timeout)
+    metric_names, metric_aggregations = collect_metric_inventory(
+        metric_name_url, metric_aggregation_url, username, api_key,
+        quiet=args.quiet, timeout=args.timeout, gcx_client=gcx_client,
+    )
 
     if args.exporter:
         # Run as Prometheus exporter
@@ -861,11 +1294,13 @@ def main():
             update_interval=args.update_interval,
             quiet=args.quiet,
             timeout=args.timeout,
-            lookback=args.lookback
+            lookback=args.lookback,
+            include_histograms=args.include_histograms,
+            gcx_client=gcx_client,
         )
     else:
         # Run one-time execution
-        get_metric_rates(
+        success = get_metric_rates(
             metric_value_url,
             username,
             api_key,
@@ -877,8 +1312,13 @@ def main():
             thread_count=args.threads,
             timeout=args.timeout,
             cost_per_1000_series=args.cost_per_1000_series,
-            lookback=args.lookback
+            lookback=args.lookback,
+            include_histograms=args.include_histograms,
+            no_series_detail=args.no_series_detail,
+            gcx_client=gcx_client,
         )
+        if not success:
+            sys.exit(1)
 
 if __name__ == "__main__":
     main()

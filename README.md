@@ -18,15 +18,20 @@ The script does the following:
 
 1.  **Retrieves all metrics** from a Prometheus instance using the `/api/v1/label/__name__/values` endpoint.
 2.  **Filters metrics** automatically to exclude:
-    - Metrics ending with `_count`, `_bucket`, or `_sum` (histogram/summary components)
+    - Components from verified classic histogram families with `_bucket`, `_count`, and `_sum`
+      siblings, unless `--include-histograms` is set. Ambiguous suffixed metrics are retained.
     - Metrics beginning with `grafana_` (Grafana internal metrics)
-    - Metrics with aggregation rules defined in the cluster
-3.  **Calculates DPM rate** for each metric using a PromQL query: `count_over_time({metric_name}[Nm])/N` (where N is the configurable lookback window in minutes, default 10).
-4.  **Filters results** based on a DPM threshold (metrics with DPM > 1 by default).
-5.  **Outputs results** in various formats:
+    - Native histogram base metrics remain included because they are single first-class series,
+      not suffixed component series
+3.  **Handles Adaptive Metrics** by inventorying stored aggregated series, reading applied rules,
+    and querying those series directly. If discovery misses a metric, an explicit Adaptive Metrics
+    422 response triggers the same query automatically.
+4.  **Calculates DPM rate** for each metric using a PromQL query: `count_over_time({metric_name}[Nm])/N` (where N is the configurable lookback window in minutes, default 10).
+5.  **Filters results** based on a DPM threshold (metrics with DPM > 1 by default).
+6.  **Outputs results** in various formats:
     - **One-time mode**: CSV, JSON, text, or Prometheus exposition format files
     - **Exporter mode**: Live Prometheus metrics endpoint at `/metrics`
-6.  **Provides detailed logging** with configurable verbosity levels for monitoring progress and debugging.
+7.  **Provides detailed logging** with configurable verbosity levels for monitoring progress and debugging.
 
 ## How To
 
@@ -41,6 +46,14 @@ PROMETHEUS_ENDPOINT=""
 PROMETHEUS_USERNAME=""
 PROMETHEUS_API_KEY=""
 ```
+
+The API key requires both of these access-policy scopes:
+
+- `metrics:read` to list and query Prometheus metrics
+- `adaptive-metrics-rules:read` to discover applied Adaptive Metrics aggregation rules
+
+Without `adaptive-metrics-rules:read`, the script can still inventory stored aggregated series and
+retry an aggregated metric from its Prometheus 422 response, but it cannot inspect current rules.
 
 ### 2. Install all libraries from requirements.txt
 
@@ -61,6 +74,27 @@ python3 -m pip install -r requirements.txt
 ``` bash
 ./dpm-finder.py -e -p 9966
 ```
+
+### Use an existing GCX login
+
+GCX mode runs every Prometheus query through the `gcx` executable, so the script does not need a
+`.env` file or direct access-policy token. GCX remains responsible for its cross-platform config,
+credential storage, authentication refresh, and datasource selection.
+
+```bash
+# Use the current GCX context and its configured Prometheus datasource
+./dpm-finder.py --gcx -f json
+
+# Select a context without changing the user's current GCX context
+./dpm-finder.py --gcx --gcx-context robk -f json
+
+# Override the configured Prometheus datasource when a context has more than one
+./dpm-finder.py --gcx --gcx-context robk --gcx-datasource prometheus-uid -f json
+```
+
+The `gcx` executable must be on `PATH`. Use `--gcx-binary /path/to/gcx` for a custom location.
+Adaptive Metrics rule discovery may require a separate GCX cloud login. If that lookup is not
+authorised, the run continues using stored aggregated-series discovery and targeted 422 detection.
 
 ## Docker Usage
 
@@ -382,7 +416,7 @@ All log messages include timestamps and severity levels for better monitoring an
 ## Usage
 
 
-usage: dpm-finder.py [-h] [-f {csv,text,txt,json,prom}] [-m MIN_DPM] [-q] [-v] [-t THREADS] [-e] [-p PORT] [-u UPDATE_INTERVAL] [--timeout TIMEOUT] [-l LOOKBACK] [--cost-per-1000-series COST]
+usage: dpm-finder.py [-h] [-f {csv,text,txt,json,prom}] [-m MIN_DPM] [-q] [-v] [-t THREADS] [-e] [-p PORT] [-u UPDATE_INTERVAL] [--timeout TIMEOUT] [-l LOOKBACK] [--cost-per-1000-series COST] [--include-histograms] [--no-series-detail] [--gcx] [--gcx-context CONTEXT] [--gcx-datasource UID] [--gcx-binary PATH]
 
 
         DPM Finder - A tool to calculate Data Points per Minute (DPM) for Prometheus metrics.
@@ -413,14 +447,28 @@ optional arguments:
   --cost-per-1000-series COST
                         Dollar cost per 1000 active series. If provided, output includes estimated_cost
                         and is sorted by highest cost.
+  --include-histograms Include components from verified classic histogram families
+                        (_bucket, _count, _sum).
+                        Native histogram base metrics are always included.
+  --no-series-detail  Do not retain per-series labels in JSON/text output, reducing memory usage on
+                        large stacks.
+  --gcx              Run all metric queries through GCX and reuse its authenticated context.
+  --gcx-context      GCX context name (default: current context). Requires --gcx.
+  --gcx-datasource   Prometheus datasource UID (default: configured datasource). Requires --gcx.
+  --gcx-binary       GCX executable name or path (default: gcx). Requires --gcx.
 
 ## Filtered Metrics
 
 The script automatically excludes certain metric types to focus on meaningful data:
 
-- **Histogram/Summary components**: Metrics ending with `_count`, `_bucket`, or `_sum`
+- **Classic histogram components**: Complete `_bucket`, `_count`, and `_sum` families are excluded
+  by default and included with `--include-histograms`. Ambiguous suffix metrics remain included.
+- **Native histograms**: Base metrics are always analyzed. `count_over_time` counts native histogram
+  samples numerically, so their DPM and active-series count use the same output fields as float series.
 - **Grafana internal metrics**: Metrics beginning with `grafana_`
-- **Aggregated metrics**: Metrics that have aggregation rules defined in the Prometheus cluster
+- **Adaptive Metrics**: Metrics covered by aggregation rules are retained and analyzed through
+  their stored aggregated series. The `__aggregation__` label is included in JSON and text
+  per-series details so different stored aggregations remain identifiable.
 
 This filtering helps reduce noise and focuses analysis on core application and infrastructure metrics.
 
@@ -442,11 +490,20 @@ The script requires these Python packages (installed via requirements.txt):
 # JSON output with high threshold and more threads
 ./dpm-finder.py -f json -m 10.0 -t 16
 
+# Memory-bounded JSON output without per-series label dictionaries
+./dpm-finder.py -f json --no-series-detail
+
+# Include classic histogram component series
+./dpm-finder.py --include-histograms
+
 # Quiet mode for scripting
 ./dpm-finder.py -q -f csv -m 2.0
 
 # Verbose debugging
 ./dpm-finder.py -v -t 8
+
+# Reuse the current GCX login instead of configuring direct credentials
+./dpm-finder.py --gcx -f json
 ```
 
 ### Exporter Mode
