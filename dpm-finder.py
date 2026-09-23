@@ -5,6 +5,7 @@ main.py - calculate the DPM for a given prometheus cluster
 and return the results
 """
 import os
+import re
 import time
 import argparse
 import json
@@ -255,7 +256,7 @@ def retry_with_backoff(operation, operation_name, max_retries=3, retry_delay=2, 
                 return None
 
 def get_metric_json(url, username, api_key, quiet=False, timeout=60,
-                    resource_name="metric data", required_scope=None):
+                    resource_name="metric data", required_scope=None, params=None):
     """
     Get JSON data from a Prometheus or Adaptive Metrics API endpoint.
     Returns:
@@ -265,6 +266,7 @@ def get_metric_json(url, username, api_key, quiet=False, timeout=60,
     response = make_request_with_retry(
         url,
         auth=HTTPBasicAuth(username, api_key),
+        params=params,
         quiet=quiet,
         timeout=timeout
     )
@@ -305,11 +307,22 @@ def get_adaptive_metrics_rules(url, username, api_key, quiet=False, timeout=60):
 
 
 def collect_metric_inventory(metric_name_url, metric_aggregation_url, username, api_key,
-                             quiet=False, timeout=60, gcx_client=None):
-    """Fetch metric names and best-effort Adaptive Metrics rules through one transport."""
+                             quiet=False, timeout=60, gcx_client=None, extra_matchers=None):
+    """Fetch metric names and best-effort Adaptive Metrics rules through one transport.
+
+    With extra_matchers and the direct HTTP transport, the metric-name lookup uses
+    Prometheus's `match[]` parameter to pre-filter to names with a matching series.
+    GCX transport has no equivalent, so it still lists every metric name.
+    """
     if gcx_client is None:
+        name_params = None
+        if extra_matchers:
+            name_params = {"match[]": "{%s}" % ','.join(extra_matchers)}
         return (
-            get_metric_json(metric_name_url, username, api_key, quiet=quiet, timeout=timeout),
+            get_metric_json(
+                metric_name_url, username, api_key, quiet=quiet, timeout=timeout,
+                params=name_params,
+            ),
             get_adaptive_metrics_rules(
                 metric_aggregation_url, username, api_key, quiet=quiet, timeout=timeout
             ),
@@ -430,7 +443,27 @@ def is_adaptive_metrics_query_error(error):
     return "can't query aggregated metric" in detail and "without aggregation" in detail
 
 
-def metric_selector(metric, adaptive_metric=False):
+LABEL_NAME_RE = re.compile(r'^[a-zA-Z_][a-zA-Z0-9_]*$')
+
+
+def build_label_matchers(pairs):
+    """Turn repeated LABEL=VALUE strings into PromQL equality matchers.
+
+    Raises ValueError with a message suitable for argparse.error() on bad input.
+    """
+    matchers = []
+    for pair in pairs or []:
+        if '=' not in pair:
+            raise ValueError(f"invalid --match value {pair!r}; expected LABEL=VALUE")
+        label, value = pair.split('=', 1)
+        if not LABEL_NAME_RE.match(label):
+            raise ValueError(f"invalid label name {label!r} in --match {pair!r}")
+        escaped_value = value.replace('\\', '\\\\').replace('"', '\\"')
+        matchers.append(f'{label}="{escaped_value}"')
+    return matchers
+
+
+def metric_selector(metric, adaptive_metric=False, extra_matchers=None):
     """Build a selector that does not affect recommendations and can inspect AM storage."""
     matchers = ['__ignore_usage__=""']
     if adaptive_metric:
@@ -439,6 +472,8 @@ def metric_selector(metric, adaptive_metric=False):
             '__aggregation__=~".+"',
             '__aggregation__!="none"',
         ])
+    if extra_matchers:
+        matchers.extend(extra_matchers)
     return f"{metric}{{{','.join(matchers)}}}"
 
 
@@ -491,7 +526,7 @@ def should_collect_series_detail(output_format, exporter_mode=False, no_series_d
 
 def process_metric_chunk(chunk, metric_value_url, username, api_key, results_queue, quiet=False,
                          timeout=60, lookback=10, collect_series_detail=False,
-                         adaptive_metrics=None, gcx_client=None):
+                         adaptive_metrics=None, gcx_client=None, extra_matchers=None):
     """
     Process a chunk of metrics and put results in the queue
     """
@@ -507,7 +542,7 @@ def process_metric_chunk(chunk, metric_value_url, username, api_key, results_que
         
         # DPM over lookback window, per minute
         adaptive_metric = metric in adaptive_metrics
-        selector = metric_selector(metric, adaptive_metric)
+        selector = metric_selector(metric, adaptive_metric, extra_matchers)
         query_dpm = metric_dpm_query(selector, lookback, collect_series_detail)
         response_dpm = query_metric(
             metric_value_url, username, api_key, query_dpm,
@@ -516,7 +551,7 @@ def process_metric_chunk(chunk, metric_value_url, username, api_key, results_que
 
         if isinstance(response_dpm, Exception) and not adaptive_metric and is_adaptive_metrics_query_error(response_dpm):
             adaptive_metric = True
-            selector = metric_selector(metric, adaptive_metric=True)
+            selector = metric_selector(metric, adaptive_metric=True, extra_matchers=extra_matchers)
             query_dpm = metric_dpm_query(selector, lookback, collect_series_detail)
             if not quiet:
                 logger.info(
@@ -605,8 +640,9 @@ def process_metric_chunk(chunk, metric_value_url, username, api_key, results_que
 def get_metric_rates(metric_value_url, username, api_key, metric_names, metric_aggregations,
                      output_format='csv', min_dpm=1, quiet=False, thread_count=10,
                      exporter_mode=False, timeout=60, cost_per_1000_series=None, lookback=10,
-                     include_histograms=False, no_series_detail=False, gcx_client=None):
-    """ 
+                     include_histograms=False, no_series_detail=False, gcx_client=None,
+                     extra_matchers=None):
+    """
     Calculate the metric rates
     Args:
         metric_value_url: URL for querying metric values
@@ -622,6 +658,9 @@ def get_metric_rates(metric_value_url, username, api_key, metric_names, metric_a
         cost_per_1000_series: Optional float; if provided, compute and sort by estimated cost
         include_histograms: Include classic _bucket, _count, and _sum component series
         no_series_detail: Do not retain per-series labels for JSON/text output
+        extra_matchers: Optional list of PromQL equality matchers (e.g. 'cluster="prod"')
+            applied to every metric's selector, restricting DPM and series_count to the
+            active series that carry them
     Returns:
         True if processing was successful, False otherwise
     """
@@ -691,7 +730,8 @@ def get_metric_rates(metric_value_url, username, api_key, metric_names, metric_a
         futures = [
             executor.submit(
                 process_metric_chunk, chunk, metric_value_url, username, api_key, results_queue,
-                quiet, timeout, lookback, collect_series_detail, adaptive_metrics, gcx_client
+                quiet, timeout, lookback, collect_series_detail, adaptive_metrics, gcx_client,
+                extra_matchers
             )
             for chunk in metric_chunks
         ]
@@ -895,7 +935,7 @@ def get_metric_rates(metric_value_url, username, api_key, metric_names, metric_a
 
 def run_metrics_updater(metric_value_url, metric_name_url, metric_aggregation_url, username, api_key,
                        min_dpm, thread_count, update_interval, quiet, timeout=60, lookback=10,
-                       include_histograms=False, gcx_client=None):
+                       include_histograms=False, gcx_client=None, extra_matchers=None):
     """
     Run periodic metrics updates for exporter mode
     """
@@ -909,6 +949,7 @@ def run_metrics_updater(metric_value_url, metric_name_url, metric_aggregation_ur
             metric_names, metric_aggregations = collect_metric_inventory(
                 metric_name_url, metric_aggregation_url, username, api_key,
                 quiet=True, timeout=timeout, gcx_client=gcx_client,
+                extra_matchers=extra_matchers,
             )
             
             if metric_names is not None:
@@ -927,6 +968,7 @@ def run_metrics_updater(metric_value_url, metric_name_url, metric_aggregation_ur
                     lookback=lookback,
                     include_histograms=include_histograms,
                     gcx_client=gcx_client,
+                    extra_matchers=extra_matchers,
                 )
                 if success:
                     logger.debug("Metrics updated successfully")
@@ -952,7 +994,7 @@ def run_metrics_updater(metric_value_url, metric_name_url, metric_aggregation_ur
 
 def run_exporter(port, metric_value_url, metric_name_url, metric_aggregation_url, username, api_key,
                 min_dpm, thread_count, update_interval, quiet, timeout=60, lookback=10,
-                include_histograms=False, gcx_client=None):
+                include_histograms=False, gcx_client=None, extra_matchers=None):
     """
     Run the Prometheus exporter server
     """
@@ -992,6 +1034,7 @@ def run_exporter(port, metric_value_url, metric_name_url, metric_aggregation_url
         metric_names, metric_aggregations = collect_metric_inventory(
             metric_name_url, metric_aggregation_url, username, api_key,
             quiet=quiet, timeout=timeout, gcx_client=gcx_client,
+            extra_matchers=extra_matchers,
         )
         
         if metric_names is not None:
@@ -1009,6 +1052,7 @@ def run_exporter(port, metric_value_url, metric_name_url, metric_aggregation_url
                 lookback=lookback,
                 include_histograms=include_histograms,
                 gcx_client=gcx_client,
+                extra_matchers=extra_matchers,
             )
             if success:
                 logger.info("Initial metrics collection completed")
@@ -1034,7 +1078,7 @@ def run_exporter(port, metric_value_url, metric_name_url, metric_aggregation_url
         target=run_metrics_updater,
         args=(metric_value_url, metric_name_url, metric_aggregation_url, username, api_key,
               min_dpm, thread_count, update_interval, quiet, timeout, lookback,
-              include_histograms, gcx_client),
+              include_histograms, gcx_client, extra_matchers),
         daemon=True
     )
     updater_thread.start()
@@ -1143,6 +1187,16 @@ def main():
         help='Optional: Dollar cost per 1000 active series. If provided, output includes estimated_cost and is sorted by highest cost.'
     )
     parser.add_argument(
+        '--match',
+        action='append',
+        metavar='LABEL=VALUE',
+        help=(
+            'Restrict every metric to active series carrying this label value '
+            '(repeatable, e.g. --match cluster=acme-corp-prod-01). Both DPM and '
+            'series_count are computed only over the matching series.'
+        )
+    )
+    parser.add_argument(
         '--include-histograms',
         action='store_true',
         help=(
@@ -1213,6 +1267,11 @@ def main():
     if not args.gcx and (args.gcx_context or args.gcx_datasource or args.gcx_binary != 'gcx'):
         parser.error("--gcx-context, --gcx-datasource, and --gcx-binary require --gcx")
 
+    try:
+        extra_matchers = build_label_matchers(args.match)
+    except ValueError as e:
+        parser.error(str(e))
+
     if not args.quiet:
         if args.exporter:
             logger.info("Running in exporter mode:")
@@ -1230,6 +1289,8 @@ def main():
         logger.info(f"- Request timeout: {args.timeout}s")
         logger.info(f"- Lookback window: {args.lookback}m")
         logger.info(f"- Include classic histogram components: {args.include_histograms}")
+        if extra_matchers:
+            logger.info(f"- Label filter: {{{', '.join(extra_matchers)}}}")
         if not args.exporter and args.format in ('json', 'text', 'txt'):
             logger.info(f"- Collect per-series detail: {not args.no_series_detail}")
         if args.gcx:
@@ -1278,6 +1339,7 @@ def main():
     metric_names, metric_aggregations = collect_metric_inventory(
         metric_name_url, metric_aggregation_url, username, api_key,
         quiet=args.quiet, timeout=args.timeout, gcx_client=gcx_client,
+        extra_matchers=extra_matchers,
     )
 
     if args.exporter:
@@ -1297,6 +1359,7 @@ def main():
             lookback=args.lookback,
             include_histograms=args.include_histograms,
             gcx_client=gcx_client,
+            extra_matchers=extra_matchers,
         )
     else:
         # Run one-time execution
@@ -1316,6 +1379,7 @@ def main():
             include_histograms=args.include_histograms,
             no_series_detail=args.no_series_detail,
             gcx_client=gcx_client,
+            extra_matchers=extra_matchers,
         )
         if not success:
             sys.exit(1)

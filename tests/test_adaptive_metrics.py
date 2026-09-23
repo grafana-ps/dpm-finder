@@ -306,6 +306,99 @@ class AdaptiveMetricQueryTests(unittest.TestCase):
         self.assertIn("unrelated Prometheus 422", "\n".join(logs.output))
 
 
+class LabelMatcherTests(unittest.TestCase):
+    def test_builds_one_matcher_per_label_value_pair(self):
+        matchers = dpm_finder.build_label_matchers(["cluster=acme-corp-prod-01"])
+
+        self.assertEqual(matchers, ['cluster="acme-corp-prod-01"'])
+
+    def test_escapes_quotes_and_backslashes_in_the_value(self):
+        matchers = dpm_finder.build_label_matchers(['job=weird"value\\thing'])
+
+        self.assertEqual(matchers, ['job="weird\\"value\\\\thing"'])
+
+    def test_rejects_a_pair_without_an_equals_sign(self):
+        with self.assertRaises(ValueError):
+            dpm_finder.build_label_matchers(["clustervalue"])
+
+    def test_rejects_an_invalid_label_name(self):
+        with self.assertRaises(ValueError):
+            dpm_finder.build_label_matchers(["1bad=oops"])
+
+    def test_none_input_builds_no_matchers(self):
+        self.assertEqual(dpm_finder.build_label_matchers(None), [])
+
+    def test_selector_includes_extra_matchers_alongside_the_default_ones(self):
+        selector = dpm_finder.metric_selector(
+            "up", extra_matchers=['cluster="acme-corp-prod-01"']
+        )
+
+        self.assertIn('__ignore_usage__=""', selector)
+        self.assertIn('cluster="acme-corp-prod-01"', selector)
+
+    def test_process_metric_chunk_scopes_both_queries_to_the_label(self):
+        responses = [
+            FakeResponse({"data": {"result": [{"metric": {}, "value": [1, "2.0"]}]}}),
+            FakeResponse({"data": {"result": [{"value": [1, "5"]}]}}),
+        ]
+        results = queue.Queue()
+
+        with patch.object(dpm_finder, "make_request_with_retry", side_effect=responses) as request:
+            dpm_finder.process_metric_chunk(
+                ["up"],
+                "https://prometheus.example.net/api/prom/api/v1/query",
+                "123",
+                "token",
+                results,
+                adaptive_metrics=set(),
+                extra_matchers=['cluster="acme-corp-prod-01"'],
+            )
+
+        queries = [call.kwargs["params"]["query"] for call in request.call_args_list]
+        self.assertIn('cluster="acme-corp-prod-01"', queries[0])
+        self.assertIn('cluster="acme-corp-prod-01"', queries[1])
+
+        payload, _ = results.get_nowait()
+        self.assertEqual(payload["up"]["series_count"], "5")
+
+    def test_metric_name_lookup_is_prefiltered_by_the_label_when_matchers_are_given(self):
+        names_response = FakeResponse({"data": ["up", "cluster_scoped_metric"]})
+        rules_response = FakeResponse([])
+
+        with patch.object(
+            dpm_finder, "make_request_with_retry", side_effect=[names_response, rules_response]
+        ) as request:
+            metric_names, _ = dpm_finder.collect_metric_inventory(
+                "https://prometheus.example.net/api/prom/api/v1/label/__name__/values",
+                "https://prometheus.example.net/aggregations/rules",
+                "123",
+                "token",
+                extra_matchers=['cluster="acme-corp-prod-01"'],
+            )
+
+        self.assertEqual(metric_names, {"data": ["up", "cluster_scoped_metric"]})
+        name_lookup_params = request.call_args_list[0].kwargs["params"]
+        self.assertEqual(name_lookup_params, {"match[]": '{cluster="acme-corp-prod-01"}'})
+        # The Adaptive Metrics rules lookup is not a series query and stays unfiltered.
+        self.assertIsNone(request.call_args_list[1].kwargs.get("params"))
+
+    def test_metric_name_lookup_is_unfiltered_without_matchers(self):
+        names_response = FakeResponse({"data": ["up"]})
+        rules_response = FakeResponse([])
+
+        with patch.object(
+            dpm_finder, "make_request_with_retry", side_effect=[names_response, rules_response]
+        ) as request:
+            dpm_finder.collect_metric_inventory(
+                "https://prometheus.example.net/api/prom/api/v1/label/__name__/values",
+                "https://prometheus.example.net/aggregations/rules",
+                "123",
+                "token",
+            )
+
+        self.assertIsNone(request.call_args_list[0].kwargs.get("params"))
+
+
 class AdaptiveMetricPermissionTests(unittest.TestCase):
     def test_missing_rules_permission_names_required_scope(self):
         permission_error = http_error(403, {"status": "error", "error": "access denied"})
