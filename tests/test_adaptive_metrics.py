@@ -329,6 +329,11 @@ class LabelMatcherTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             dpm_finder.build_label_matchers(["cluster="])
 
+    def test_accepts_a_colon_in_the_label_name(self):
+        matchers = dpm_finder.build_label_matchers(["foo:bar=prod"])
+
+        self.assertEqual(matchers, ['foo:bar="prod"'])
+
     def test_escapes_newline_and_carriage_return_in_the_value(self):
         matchers = dpm_finder.build_label_matchers(["job=line1\nline2\rend"])
 
