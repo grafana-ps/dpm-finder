@@ -310,9 +310,9 @@ def collect_metric_inventory(metric_name_url, metric_aggregation_url, username, 
                              quiet=False, timeout=60, gcx_client=None, extra_matchers=None):
     """Fetch metric names and best-effort Adaptive Metrics rules through one transport.
 
-    With extra_matchers and the direct HTTP transport, the metric-name lookup uses
-    Prometheus's `match[]` parameter to pre-filter to names with a matching series.
-    GCX transport has no equivalent, so it still lists every metric name.
+    Only HTTP pre-filters names by extra_matchers, via Prometheus's match[] param.
+    GCX still lists every name. So filter_metric_names' histogram exclusion can
+    differ by transport too, and that is fine.
     """
     if gcx_client is None:
         name_params = None
