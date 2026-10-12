@@ -443,7 +443,7 @@ def is_adaptive_metrics_query_error(error):
     return "can't query aggregated metric" in detail and "without aggregation" in detail
 
 
-LABEL_NAME_RE = re.compile(r'^[a-zA-Z_][a-zA-Z0-9_]*$')
+LABEL_NAME_RE = re.compile(r'^[a-zA-Z_:][a-zA-Z0-9_:]*$')
 
 
 def build_label_matchers(pairs):
