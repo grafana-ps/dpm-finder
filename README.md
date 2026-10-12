@@ -416,7 +416,7 @@ All log messages include timestamps and severity levels for better monitoring an
 ## Usage
 
 
-usage: dpm-finder.py [-h] [-f {csv,text,txt,json,prom}] [-m MIN_DPM] [-q] [-v] [-t THREADS] [-e] [-p PORT] [-u UPDATE_INTERVAL] [--timeout TIMEOUT] [-l LOOKBACK] [--cost-per-1000-series COST] [--include-histograms] [--no-series-detail] [--gcx] [--gcx-context CONTEXT] [--gcx-datasource UID] [--gcx-binary PATH]
+usage: dpm-finder.py [-h] [-f {csv,text,txt,json,prom}] [-m MIN_DPM] [-q] [-v] [-t THREADS] [-e] [-p PORT] [-u UPDATE_INTERVAL] [--timeout TIMEOUT] [-l LOOKBACK] [--cost-per-1000-series COST] [--match LABEL=VALUE] [--include-histograms] [--no-series-detail] [--gcx] [--gcx-context CONTEXT] [--gcx-datasource UID] [--gcx-binary PATH]
 
 
         DPM Finder - A tool to calculate Data Points per Minute (DPM) for Prometheus metrics.
@@ -456,6 +456,8 @@ optional arguments:
   --gcx-context      GCX context name (default: current context). Requires --gcx.
   --gcx-datasource   Prometheus datasource UID (default: configured datasource). Requires --gcx.
   --gcx-binary       GCX executable name or path (default: gcx). Requires --gcx.
+  --match LABEL=VALUE   Restrict every metric to active series carrying this label value
+                        (repeatable). Both dpm and series_count count only the matching series.
 
 ## Filtered Metrics
 

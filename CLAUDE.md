@@ -83,6 +83,7 @@ Extract `cluster_slug` for the endpoint URL and `id` for the username.
 | `--gcx-context` | current | Select a GCX context without changing the current context |
 | `--gcx-datasource` | configured | Override the GCX Prometheus datasource UID |
 | `--gcx-binary` | `gcx` | GCX executable name or path |
+| `--match` | _(none)_ | Restrict every metric to active series carrying `LABEL=VALUE` (repeatable). Both `dpm` and `series_count` count only the matching series |
 | `-q`, `--quiet` | `false` | Suppress progress output |
 | `-v`, `--verbose` | `false` | Enable debug logging |
 | `-e`, `--exporter` | `false` | Run as Prometheus exporter instead of one-shot |
@@ -122,6 +123,7 @@ Prometheus exposition format suitable for Alloy's `prometheus.exporter.unix` tex
 - Sort by DPM descending to find the noisiest metrics
 - For top metrics, examine `series_detail` to identify which label combinations drive the highest DPM
 - If `--cost-per-1000-series` is set, use `estimated_cost` to prioritize by spend
+- If `--match` is set, `dpm` and `series_count` count only the active series that carry that label value
 
 ## Rate Limiting
 
