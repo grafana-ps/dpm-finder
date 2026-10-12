@@ -458,7 +458,14 @@ def build_label_matchers(pairs):
         label, value = pair.split('=', 1)
         if not LABEL_NAME_RE.match(label):
             raise ValueError(f"invalid label name {label!r} in --match {pair!r}")
-        escaped_value = value.replace('\\', '\\\\').replace('"', '\\"')
+        if value == '':
+            raise ValueError(f"invalid --match value {pair!r}; the label value must be non-empty")
+        escaped_value = (
+            value.replace('\\', '\\\\')
+            .replace('"', '\\"')
+            .replace('\n', '\\n')
+            .replace('\r', '\\r')
+        )
         matchers.append(f'{label}="{escaped_value}"')
     return matchers
 
