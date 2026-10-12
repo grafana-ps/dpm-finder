@@ -1200,7 +1200,8 @@ def main():
         help=(
             'Restrict every metric to active series carrying this label value '
             '(repeatable, e.g. --match cluster=acme-corp-prod-01). Both DPM and '
-            'series_count are computed only over the matching series.'
+            'series_count are computed only over the matching series. VALUE must '
+            'be non-empty; an empty value would also match series missing the label.'
         )
     )
     parser.add_argument(

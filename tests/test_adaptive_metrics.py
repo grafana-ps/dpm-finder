@@ -325,6 +325,15 @@ class LabelMatcherTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             dpm_finder.build_label_matchers(["1bad=oops"])
 
+    def test_rejects_an_empty_value(self):
+        with self.assertRaises(ValueError):
+            dpm_finder.build_label_matchers(["cluster="])
+
+    def test_escapes_newline_and_carriage_return_in_the_value(self):
+        matchers = dpm_finder.build_label_matchers(["job=line1\nline2\rend"])
+
+        self.assertEqual(matchers, ['job="line1\\nline2\\rend"'])
+
     def test_none_input_builds_no_matchers(self):
         self.assertEqual(dpm_finder.build_label_matchers(None), [])
 
