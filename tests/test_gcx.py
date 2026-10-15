@@ -112,6 +112,21 @@ class GCXClientTests(unittest.TestCase):
         self.assertIn('__aggregation__!="none"', client.query.call_args_list[1].args[0])
         self.assertIn("scrape_samples_scraped", results.get_nowait()[0])
 
+    def test_metric_name_lookup_ignores_extra_matchers_under_gcx(self):
+        client = unittest.mock.Mock()
+        client.list_metric_names.return_value = {"data": ["up"]}
+        client.list_adaptive_metrics_rules.return_value = []
+
+        metric_names, metric_aggregations = dpm_finder.collect_metric_inventory(
+            None, None, None, None,
+            gcx_client=client,
+            extra_matchers=['cluster="acme-corp-prod-01"'],
+        )
+
+        self.assertEqual(metric_names, {"data": ["up"]})
+        self.assertEqual(metric_aggregations, [])
+        client.list_metric_names.assert_called_once_with()
+
 
 class MainExitStatusTests(unittest.TestCase):
     def test_one_shot_inventory_failure_exits_nonzero(self):
